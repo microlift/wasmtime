@@ -498,7 +498,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             oldval_hi,
             ..
         } => {
-            collector.reg_fixed_use(addr, xreg(25));
+            collector.reg_use(addr);
             collector.reg_fixed_use(expected_lo, xreg(0));
             collector.reg_fixed_use(expected_hi, xreg(1));
             collector.reg_fixed_use(replacement_lo, xreg(2));
