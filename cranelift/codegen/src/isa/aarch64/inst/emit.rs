@@ -650,7 +650,10 @@ fn enc_casp(rs: Reg, rt: Reg, rn: Reg) -> u32 {
     debug_assert_eq!(machreg_to_gpr(rs) & 1, 0);
     debug_assert_eq!(machreg_to_gpr(rt) & 1, 0);
 
-    0x4860_fc00 | (machreg_to_gpr(rs) << 16) | (machreg_to_gpr(rn) << 5) | machreg_to_gpr(rt)
+    0b00_0010001_1_1_00000_1_11111_00000_00000
+        | (machreg_to_gpr(rs) << 16)
+        | (machreg_to_gpr(rn) << 5)
+        | machreg_to_gpr(rt)
 }
 
 fn enc_asimd_mod_imm(rd: Writable<Reg>, q_op: u32, cmode: u32, imm: u8) -> u32 {
