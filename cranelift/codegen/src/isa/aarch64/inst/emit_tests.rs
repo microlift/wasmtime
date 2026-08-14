@@ -7784,6 +7784,20 @@ fn test_aarch64_binemit() {
         "casal x7, x7, x15, [x27]",
     ));
     insns.push((
+        Inst::AtomicCASP {
+            addr: xreg(25),
+            expected_lo: xreg(0),
+            expected_hi: xreg(1),
+            replacement_lo: xreg(2),
+            replacement_hi: xreg(3),
+            oldval_lo: writable_xreg(0),
+            oldval_hi: writable_xreg(1),
+            flags: MemFlagsData::trusted(),
+        },
+        "22FF6048",
+        "caspal x0, x1, x2, x3, [x25]",
+    ));
+    insns.push((
         Inst::AtomicCASLoop {
             ty: I8,
             flags: MemFlagsData::trusted(),

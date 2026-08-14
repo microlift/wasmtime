@@ -313,6 +313,18 @@
          (ty Type)
          (flags MemFlagsData))
 
+       ;; An atomic 128-bit compare-and-swap using CASP. The operands are
+       ;; fixed to consecutive register pairs.
+       (AtomicCASP
+        (addr Reg)
+        (expected_lo Reg)
+        (expected_hi Reg)
+        (replacement_lo Reg)
+        (replacement_hi Reg)
+        (oldval_lo WritableReg)
+        (oldval_hi WritableReg)
+        (flags MemFlagsData))
+
        ;; Read `access_ty` bits from address `rt`, either 8, 16, 32 or 64-bits, and put
        ;; it in `rn`, optionally zero-extending to fill a word or double word result.
        ;; This instruction is sequentially consistent.
@@ -4440,6 +4452,17 @@
             (_ Unit (emit (MInst.AtomicCAS dst expect replace addr ty flags)))
           )
           dst))
+
+;; Helper for emitting a `CASP` instruction. The result is the old 128-bit
+;; value, represented as a pair of 64-bit registers.
+(decl lse_atomic_casp (Reg Reg Reg Reg Reg MemFlagsData) ValueRegs)
+(rule (lse_atomic_casp addr expected_lo expected_hi replacement_lo replacement_hi flags)
+      (let ((oldval_lo WritableReg (temp_writable_reg $I64))
+            (oldval_hi WritableReg (temp_writable_reg $I64))
+            (_ Unit (emit (MInst.AtomicCASP addr expected_lo expected_hi
+                                             replacement_lo replacement_hi
+                                             oldval_lo oldval_hi flags))))
+        (value_regs oldval_lo oldval_hi)))
 
 ;; Helper for emitting `MInst.AtomicRMWLoop` instructions.
 ;; - Make sure that both args are in virtual regs, since in effect

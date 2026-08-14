@@ -646,6 +646,13 @@ fn enc_cas(size: u32, rs: Writable<Reg>, rt: Reg, rn: Reg) -> u32 {
         | machreg_to_gpr(rt)
 }
 
+fn enc_casp(rs: Reg, rt: Reg, rn: Reg) -> u32 {
+    debug_assert_eq!(machreg_to_gpr(rs) & 1, 0);
+    debug_assert_eq!(machreg_to_gpr(rt) & 1, 0);
+
+    0x4860_fc00 | (machreg_to_gpr(rs) << 16) | (machreg_to_gpr(rn) << 5) | machreg_to_gpr(rt)
+}
+
 fn enc_asimd_mod_imm(rd: Writable<Reg>, q_op: u32, cmode: u32, imm: u8) -> u32 {
     let abc = (imm >> 5) as u32;
     let defgh = (imm & 0b11111) as u32;
@@ -1665,6 +1672,20 @@ impl MachInstEmit for Inst {
                 }
 
                 sink.put4(enc_cas(size, rd, rt, rn));
+            }
+            &Inst::AtomicCASP {
+                addr,
+                expected_lo,
+                replacement_lo,
+                oldval_lo,
+                flags,
+                ..
+            } => {
+                debug_assert_eq!(oldval_lo.to_reg(), expected_lo);
+                if let Some(trap_code) = flags.trap_code() {
+                    sink.add_trap(trap_code);
+                }
+                sink.put4(enc_casp(expected_lo, replacement_lo, addr));
             }
             &Inst::AtomicCASLoop { ty, flags, .. } => {
                 /* Emit this:

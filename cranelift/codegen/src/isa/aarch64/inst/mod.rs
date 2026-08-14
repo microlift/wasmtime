@@ -488,6 +488,24 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(rt);
             collector.reg_use(rn);
         }
+        Inst::AtomicCASP {
+            addr,
+            expected_lo,
+            expected_hi,
+            replacement_lo,
+            replacement_hi,
+            oldval_lo,
+            oldval_hi,
+            ..
+        } => {
+            collector.reg_fixed_use(addr, xreg(25));
+            collector.reg_fixed_use(expected_lo, xreg(0));
+            collector.reg_fixed_use(expected_hi, xreg(1));
+            collector.reg_fixed_use(replacement_lo, xreg(2));
+            collector.reg_fixed_use(replacement_hi, xreg(3));
+            collector.reg_fixed_def(oldval_lo, xreg(0));
+            collector.reg_fixed_def(oldval_hi, xreg(1));
+        }
         Inst::AtomicCASLoop {
             addr,
             expected,
@@ -1633,6 +1651,25 @@ impl Inst {
                 let rn = pretty_print_ireg(rn, OperandSize::Size64);
 
                 format!("{op} {rd}, {rs}, {rt}, [{rn}]")
+            }
+            &Inst::AtomicCASP {
+                addr,
+                expected_lo: _,
+                expected_hi: _,
+                replacement_lo,
+                replacement_hi,
+                oldval_lo,
+                oldval_hi,
+                ..
+            } => {
+                let addr = pretty_print_ireg(addr, OperandSize::Size64);
+                let replacement_lo = pretty_print_ireg(replacement_lo, OperandSize::Size64);
+                let replacement_hi = pretty_print_ireg(replacement_hi, OperandSize::Size64);
+                let oldval_lo = pretty_print_ireg(oldval_lo.to_reg(), OperandSize::Size64);
+                let oldval_hi = pretty_print_ireg(oldval_hi.to_reg(), OperandSize::Size64);
+                format!(
+                    "caspal {oldval_lo}, {oldval_hi}, {replacement_lo}, {replacement_hi}, [{addr}]"
+                )
             }
             &Inst::AtomicCASLoop {
                 ty,
