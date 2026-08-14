@@ -1676,12 +1676,15 @@ impl MachInstEmit for Inst {
             &Inst::AtomicCASP {
                 addr,
                 expected_lo,
+                expected_hi,
                 replacement_lo,
                 oldval_lo,
+                oldval_hi,
                 flags,
                 ..
             } => {
                 debug_assert_eq!(oldval_lo.to_reg(), expected_lo);
+                debug_assert_eq!(oldval_hi.to_reg(), expected_hi);
                 if let Some(trap_code) = flags.trap_code() {
                     sink.add_trap(trap_code);
                 }
