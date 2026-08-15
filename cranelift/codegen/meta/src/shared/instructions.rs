@@ -3417,6 +3417,25 @@ pub(crate) fn define(
         .other_side_effects(),
     );
 
+    ig.push(
+        Inst::new(
+            "spin_hint",
+            r#"
+        A spin-loop hint.
+
+        Tells the processor that the surrounding code is a busy-wait loop, so that it may
+        de-pipeline speculative reads, drop to a lower power state, or yield to a sibling
+        thread.  This is a performance hint only - it has no architectural effect, provides
+        no ordering, and is not a fence. Removing it changes nothing but speed.
+
+        Lowers to `pause` on x86-64 and `yield` on aarch64. Targets with no such instruction
+        emit nothing.
+        "#,
+            &formats.nullary,
+        )
+        .other_side_effects(),
+    );
+
     let TxN = &TypeVar::new(
         "TxN",
         "A dynamic vector type",

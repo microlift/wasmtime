@@ -531,7 +531,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(rn);
             collector.reg_use(rt);
         }
-        Inst::Fence {} | Inst::Csdb {} => {}
+        Inst::Fence {} | Inst::Csdb {} | Inst::Yield {} => {}
         Inst::FpuMove32 { rd, rn } => {
             collector.reg_def(rd);
             collector.reg_use(rn);
@@ -1736,6 +1736,9 @@ impl Inst {
             }
             &Inst::Csdb {} => {
                 format!("csdb")
+            }
+            &Inst::Yield {} => {
+                format!("yield")
             }
             &Inst::FpuMove32 { rd, rn } => {
                 let rd = pretty_print_vreg_scalar(rd.to_reg(), ScalarSize::Size32);

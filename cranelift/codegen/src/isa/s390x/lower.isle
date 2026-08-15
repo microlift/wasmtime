@@ -3825,6 +3825,13 @@
       (side_effect (fence_impl)))
 
 
+;;;; Rules for `spin_hint` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; z/Architecture has no spin-loop hint, and the opcode is a pure performance
+;; hint, so there is nothing to emit.
+(rule (lower (spin_hint)) (output_none))
+
+
 ;;;; Rules for `icmp` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; We want to optimize the typical use of `icmp` (generating an integer 0/1

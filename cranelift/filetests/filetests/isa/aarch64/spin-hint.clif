@@ -1,0 +1,19 @@
+test compile precise-output
+target aarch64
+
+function %spin_hint() {
+block0:
+    spin_hint
+    return
+}
+
+; VCode:
+; block0:
+;   yield
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   yield
+;   ret
+

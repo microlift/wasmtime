@@ -1,0 +1,17 @@
+test compile precise-output
+target riscv64
+
+function %spin_hint() {
+block0:
+    spin_hint
+    return
+}
+
+; VCode:
+; block0:
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   ret
+

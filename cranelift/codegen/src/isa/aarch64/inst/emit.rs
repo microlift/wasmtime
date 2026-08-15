@@ -1803,6 +1803,10 @@ impl MachInstEmit for Inst {
             &Inst::Csdb {} => {
                 sink.put4(0xd503229f);
             }
+            &Inst::Yield {} => {
+                // HINT #1.
+                sink.put4(0xd503203f);
+            }
             &Inst::FpuMove32 { rd, rn } => {
                 sink.put4(enc_fpurr(0b000_11110_00_1_000000_10000, rd, rn));
             }

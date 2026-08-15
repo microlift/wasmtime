@@ -8,6 +8,8 @@ pub fn list() -> Vec<Inst> {
         inst("sfence", fmt("ZO", []), rex([0x0f, 0xae, 0xf8]), _64b | compat),
         inst("lfence", fmt("ZO", []), rex([0x0f, 0xae, 0xe8]), (_64b | compat) & sse2),
 
+        inst("pause", fmt("ZO", []), rex([0xf3, 0x90]), _64b | compat),
+
         inst("hlt", fmt("ZO", []), rex([0xf4]), _64b | compat),
         inst("ud2", fmt("ZO", []), rex([0x0f, 0x0b]), _64b | compat).has_trap(),
         inst("int3", fmt("ZO", []), rex([0xcc]), _64b | compat),

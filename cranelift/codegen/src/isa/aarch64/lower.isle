@@ -2440,6 +2440,11 @@
 (rule (lower (fence))
       (side_effect (aarch64_fence)))
 
+;;;; Rules for `SpinHint` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (spin_hint))
+      (side_effect (aarch64_yield)))
+
 ;;;; Rules for `Debugtrap` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (rule (lower (debugtrap))

@@ -342,6 +342,10 @@
        ;; Consumption of speculative data barrier.
        (Csdb)
 
+       ;; Spin-loop hint (`yield`, in the HINT encoding space). A pure
+       ;; performance hint with no architectural effect and no ordering.
+       (Yield)
+
        ;; FPU 32-bit move.
        (FpuMove32
          (rd WritableReg)
@@ -3236,6 +3240,11 @@
 (decl csdb () SideEffectNoResult)
 (rule (csdb)
       (SideEffectNoResult.Inst (MInst.Csdb)))
+
+;; Helper for generating `yield` instructions.
+(decl aarch64_yield () SideEffectNoResult)
+(rule (aarch64_yield)
+      (SideEffectNoResult.Inst (MInst.Yield)))
 
 ;; Helper for generating `brk` instructions, hinted as being debug traps.
 (decl brk () SideEffectNoResult)

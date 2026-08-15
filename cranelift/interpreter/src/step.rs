@@ -1260,6 +1260,10 @@ where
             // actually need to emit a fence here.
             ControlFlow::Continue
         }
+        Opcode::SpinHint => {
+            // A pure performance hint with no architectural effect.
+            ControlFlow::Continue
+        }
         Opcode::SqmulRoundSat => {
             let lane_type = ctrl_ty.lane_type();
             let double_width = ctrl_ty.double_width().unwrap().lane_type();

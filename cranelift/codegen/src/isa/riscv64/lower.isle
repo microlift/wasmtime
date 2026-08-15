@@ -2165,6 +2165,13 @@
   (lower (fence))
   (side_effect (SideEffectNoResult.Inst (MInst.Fence 15 15))))
 
+;;;;;  Rules for `spin_hint`;;;;;;;;;
+;; Zihintpause spells `pause` as `fence w, 0`, but a fence is an ordering
+;; instruction on hardware that does not recognize the hint, and `spin_hint`
+;; promises no ordering. Emit nothing rather than something stronger than the
+;; opcode is allowed to be.
+(rule (lower (spin_hint)) (output_none))
+
 ;;;;;  Rules for `trap`;;;;;;;;;
 (rule
   (lower (trap code))

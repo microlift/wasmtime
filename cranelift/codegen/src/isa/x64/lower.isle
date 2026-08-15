@@ -3373,6 +3373,11 @@
 (rule (lower (fence))
       (side_effect (x64_mfence_zo)))
 
+;; Rules for `spin_hint` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (spin_hint))
+      (side_effect (x64_pause_zo)))
+
 ;; Rules for `func_addr` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (rule (lower (func_addr _ (func_ref_data _ extname dist _)))
