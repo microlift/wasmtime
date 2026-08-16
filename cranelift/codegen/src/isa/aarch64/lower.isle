@@ -1283,6 +1283,50 @@
 (rule 1 (lower (uextend (fits_in_64 _) (fcmp _ cond x @ (value_type (ty_scalar_float _)) y)))
       (lower_cond_result_bool (emit_fcmp cond x y)))
 
+;; An instruction with a 32-bit destination writes a W register, which zeroes
+;; bits 63:32 of the underlying X register. Extending such a value to 64 bits is
+;; therefore already done by the time the producer retires, and the `uextend`
+;; needs no instruction of its own.
+(rule 2 (lower (uextend $I64 x @ (value_type $I32)))
+      (if-let _ (zeroes_upper32 x))
+      (value_reg (put_in_reg x)))
+
+;; `Unit` returning because it is used only as a guard. `(if-let _ ...)` above
+;; discards the value, and there is nothing meaningful to hand back.
+(decl pure partial zeroes_upper32 (Value) Unit)
+
+;; Three-operand ALU. `add`/`sub`/`and`/`orr`/`eor`/`mul` and the shift and
+;; rotate, all of which take their operand size from the result type.
+(rule (zeroes_upper32 (iadd $I32 _ _)) (unit))
+(rule (zeroes_upper32 (isub $I32 _ _)) (unit))
+(rule (zeroes_upper32 (imul $I32 _ _)) (unit))
+(rule (zeroes_upper32 (band $I32 _ _)) (unit))
+(rule (zeroes_upper32 (bor $I32 _ _)) (unit))
+(rule (zeroes_upper32 (bxor $I32 _ _)) (unit))
+(rule (zeroes_upper32 (ishl $I32 _ _)) (unit))
+(rule (zeroes_upper32 (ushr $I32 _ _)) (unit))
+(rule (zeroes_upper32 (sshr $I32 _ _)) (unit))
+(rule (zeroes_upper32 (rotl $I32 _ _)) (unit))
+(rule (zeroes_upper32 (rotr $I32 _ _)) (unit))
+(rule (zeroes_upper32 (udiv $I32 _ _)) (unit))
+(rule (zeroes_upper32 (sdiv $I32 _ _)) (unit))
+(rule (zeroes_upper32 (urem $I32 _ _)) (unit))
+(rule (zeroes_upper32 (srem $I32 _ _)) (unit))
+
+;; Two-operand against the zero register, and the unary bit counts.
+(rule (zeroes_upper32 (ineg $I32 _)) (unit))
+(rule (zeroes_upper32 (bnot $I32 _)) (unit))
+(rule (zeroes_upper32 (clz $I32 _)) (unit))
+(rule (zeroes_upper32 (cls $I32 _)) (unit))
+(rule (zeroes_upper32 (ctz $I32 _)) (unit))
+(rule (zeroes_upper32 (bswap $I32 _)) (unit))
+(rule (zeroes_upper32 (bitrev $I32 _)) (unit))
+
+;; A narrowing extension into `$I32` is `sxtb`/`sxth`/`uxtb`/`uxth` in W form,
+;; so it clears bits 63:32 along with everything above the source width.
+(rule (zeroes_upper32 (sextend $I32 _)) (unit))
+(rule (zeroes_upper32 (uextend $I32 _)) (unit))
+
 ;; Conversion to 128-bit needs a zero-extension of the lower bits and the upper
 ;; bits are all zero.
 (attr rule uextend_i128 (tag i128))

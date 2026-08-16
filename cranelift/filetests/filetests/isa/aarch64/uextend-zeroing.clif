@@ -1,0 +1,676 @@
+test compile precise-output
+set unwind_info=false
+target aarch64
+
+;; An instruction with a 32-bit destination writes a W register, which zeroes
+;; bits 63:32 of the underlying X register, so a `uextend` of its result needs
+;; no instruction of its own. `zeroes_upper32` in `lower.isle` is the whitelist
+;; of opcodes claimed to have that property; these tests are how the claim is
+;; checked, so read each block's disassembly and confirm the producer really is
+;; the W form before adding an opcode to it.
+
+function %uext_iadd(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = iadd v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   add w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   add w0, w0, w1
+;   ret
+
+function %uext_isub(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = isub v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   sub w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   sub w0, w0, w1
+;   ret
+
+function %uext_imul(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = imul v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   madd w0, w0, w1, wzr
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   mul w0, w0, w1
+;   ret
+
+function %uext_udiv(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = udiv v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   cbz w1, #trap=int_divz
+;   udiv w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cbz w1, #0xc
+;   udiv w0, w0, w1
+;   ret
+;   udf #0xc11f ; trap: int_divz
+
+function %uext_sdiv(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = sdiv v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   cbz w1, #trap=int_divz
+;   adds wzr, w1, #1
+;   ccmp w0, #1, #nzcv, eq
+;   b.vs #trap=int_ovf
+;   sdiv w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cbz w1, #0x18
+;   cmn w1, #1
+;   ccmp w0, #1, #0, eq
+;   b.vs #0x1c
+;   sdiv w0, w0, w1
+;   ret
+;   udf #0xc11f ; trap: int_divz
+;   udf #0xc11f ; trap: int_ovf
+
+function %uext_urem(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = urem v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   cbz w1, #trap=int_divz
+;   udiv w4, w0, w1
+;   msub w0, w4, w1, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cbz w1, #0x10
+;   udiv w4, w0, w1
+;   msub w0, w4, w1, w0
+;   ret
+;   udf #0xc11f ; trap: int_divz
+
+function %uext_srem(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = srem v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   cbz w1, #trap=int_divz
+;   sdiv w4, w0, w1
+;   msub w0, w4, w1, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cbz w1, #0x10
+;   sdiv w4, w0, w1
+;   msub w0, w4, w1, w0
+;   ret
+;   udf #0xc11f ; trap: int_divz
+
+function %uext_ineg(i32) -> i64 {
+block0(v0: i32):
+  v1 = ineg v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   sub w0, wzr, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   neg w0, w0
+;   ret
+
+function %uext_band(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = band v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   and w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   and w0, w0, w1
+;   ret
+
+function %uext_bor(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = bor v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   orr w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   orr w0, w0, w1
+;   ret
+
+function %uext_bxor(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = bxor v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   eor w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   eor w0, w0, w1
+;   ret
+
+function %uext_bnot(i32) -> i64 {
+block0(v0: i32):
+  v1 = bnot v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   orn w0, wzr, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   mvn w0, w0
+;   ret
+
+function %uext_clz(i32) -> i64 {
+block0(v0: i32):
+  v1 = clz v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   clz w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   clz w0, w0
+;   ret
+
+function %uext_cls(i32) -> i64 {
+block0(v0: i32):
+  v1 = cls v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   cls w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cls w0, w0
+;   ret
+
+function %uext_ctz(i32) -> i64 {
+block0(v0: i32):
+  v1 = ctz v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   rbit w2, w0
+;   clz w0, w2
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   rbit w2, w0
+;   clz w0, w2
+;   ret
+
+function %uext_bswap(i32) -> i64 {
+block0(v0: i32):
+  v1 = bswap v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   rev32 w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   rev w0, w0
+;   ret
+
+function %uext_bitrev(i32) -> i64 {
+block0(v0: i32):
+  v1 = bitrev v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   rbit w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   rbit w0, w0
+;   ret
+
+function %uext_ishl(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = ishl v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   lsl w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   lsl w0, w0, w1
+;   ret
+
+function %uext_ushr(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = ushr v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   lsr w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   lsr w0, w0, w1
+;   ret
+
+function %uext_sshr(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = sshr v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   asr w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   asr w0, w0, w1
+;   ret
+
+function %uext_rotr(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = rotr v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   extr w0, w0, w1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   ror w0, w0, w1
+;   ret
+
+function %uext_rotl(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = rotl v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   sub w3, wzr, w1
+;   extr w0, w0, w3
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   neg w3, w1
+;   ror w0, w0, w3
+;   ret
+
+;; Negative cases: a `csel x` copies all 64 bits of an operand whose upper half
+;; was never defined, so no amount of the comparison being in W form makes the
+;; selection zeroing. These must keep emitting the extension.
+function %uext_select(i32, i32, i32) -> i64 {
+block0(v0: i32, v1: i32, v2: i32):
+  v3 = select v0, v1, v2
+  v4 = uextend.i64 v3
+  return v4
+}
+
+; VCode:
+; block0:
+;   subs wzr, w0, wzr
+;   csel x6, x1, x2, ne
+;   mov w0, w6
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cmp w0, wzr
+;   csel x6, x1, x2, ne
+;   mov w0, w6
+;   ret
+
+function %uext_smin(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = smin v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   subs wzr, w0, w1
+;   csel x5, x0, x1, lt
+;   mov w0, w5
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cmp w0, w1
+;   csel x5, x0, x1, lt
+;   mov w0, w5
+;   ret
+
+function %uext_smax(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = smax v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   subs wzr, w0, w1
+;   csel x5, x0, x1, gt
+;   mov w0, w5
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cmp w0, w1
+;   csel x5, x0, x1, gt
+;   mov w0, w5
+;   ret
+
+function %uext_umin(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = umin v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   subs wzr, w0, w1
+;   csel x5, x0, x1, lo
+;   mov w0, w5
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cmp w0, w1
+;   csel x5, x0, x1, lo
+;   mov w0, w5
+;   ret
+
+function %uext_umax(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = umax v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   subs wzr, w0, w1
+;   csel x5, x0, x1, hi
+;   mov w0, w5
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   cmp w0, w1
+;   csel x5, x0, x1, hi
+;   mov w0, w5
+;   ret
+
+function %uext_sextend_to_i32(i16) -> i64 {
+block0(v0: i16):
+  v1 = sextend.i32 v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   sxth w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   sxth w0, w0
+;   ret
+
+function %uext_uextend_to_i32(i16) -> i64 {
+block0(v0: i16):
+  v1 = uextend.i32 v0
+  v2 = uextend.i64 v1
+  return v2
+}
+
+; VCode:
+; block0:
+;   uxth w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   uxth w0, w0
+;   ret
+
+function %uext_ishl_imm(i32) -> i64 {
+block0(v0: i32):
+  v1 = iconst.i32 3
+  v2 = ishl v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   lsl w0, w0, #3
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   lsl w0, w0, #3
+;   ret
+
+function %uext_iadd_imm(i32) -> i64 {
+block0(v0: i32):
+  v1 = iconst.i32 7
+  v2 = iadd v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   add w0, w0, #7
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   add w0, w0, #7
+;   ret
+
+;; The extended value having another use must not change the answer: the
+;; zeroing is a property of the producing instruction, not of this consumer.
+function %uext_iadd_two_uses(i32, i32) -> i64, i32 {
+block0(v0: i32, v1: i32):
+  v2 = iadd v0, v1
+  v3 = uextend.i64 v2
+  return v3, v2
+}
+
+; VCode:
+; block0:
+;   add w1, w0, w1
+;   mov x0, x1
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   add w1, w0, w1
+;   mov x0, x1
+;   ret
+
+;; The producer being in another block does not change it either - the register
+;; still holds what that instruction wrote.
+function %uext_iadd_across_blocks(i32, i32) -> i64 {
+block0(v0: i32, v1: i32):
+  v2 = iadd v0, v1
+  jump block1
+
+block1:
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   add w0, w0, w1
+;   b label1
+; block1:
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   add w0, w0, w1
+; block1: ; offset 0x4
+;   ret
+
+;; A block parameter has no producing instruction to inspect, so the extension
+;; is real work and must still be emitted.
+function %uext_block_param(i32) -> i64 {
+block0(v0: i32):
+  v1 = uextend.i64 v0
+  return v1
+}
+
+; VCode:
+; block0:
+;   mov w0, w0
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   mov w0, w0
+;   ret
+
+;; And an `$I8` producer leaves bits 31:8 holding the operation's own result,
+;; which is exactly what this `uextend` has to clear. The W-form write says
+;; nothing about them.
+function %uext_iadd_i8(i8, i8) -> i64 {
+block0(v0: i8, v1: i8):
+  v2 = iadd v0, v1
+  v3 = uextend.i64 v2
+  return v3
+}
+
+; VCode:
+; block0:
+;   add w4, w0, w1
+;   uxtb w0, w4
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   add w4, w0, w1
+;   uxtb w0, w4
+;   ret
+
