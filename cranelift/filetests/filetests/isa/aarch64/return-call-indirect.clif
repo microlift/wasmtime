@@ -190,8 +190,8 @@ block0:
 ; VCode:
 ;   stp fp, lr, [sp, #-16]!
 ;   mov fp, sp
-;   sub sp, sp, #160
-;   ldr fp, [sp, #160]
+;   sub sp, sp, #112
+;   ldr fp, [sp, #112]
 ;   stp fp, lr, [sp]
 ;   mov fp, sp
 ;   stp x27, x28, [sp, #-16]!
@@ -208,16 +208,16 @@ block0:
 ;   movz x5, #25
 ;   movz x6, #30
 ;   movz x7, #35
-;   movz x0, #40
-;   movz x1, #45
-;   movz x8, #50
-;   movz x9, #55
-;   movz x10, #60
-;   movz x11, #65
-;   movz x12, #70
-;   movz x13, #75
-;   movz x14, #80
-;   movz x15, #85
+;   movz x9, #40
+;   movz x10, #45
+;   movz x11, #50
+;   movz x12, #55
+;   movz x13, #60
+;   movz x14, #65
+;   movz x15, #70
+;   movz x0, #75
+;   movz x1, #80
+;   movz x8, #85
 ;   movz x26, #90
 ;   movz x27, #95
 ;   movz x28, #100
@@ -232,33 +232,26 @@ block0:
 ;   str x0, [sp, #112]
 ;   str x1, [sp, #120]
 ;   str x8, [sp, #128]
-;   str x9, [sp, #136]
-;   str x10, [sp, #144]
-;   str x11, [sp, #152]
-;   str x12, [sp, #160]
-;   str x13, [sp, #168]
-;   str x14, [sp, #176]
-;   str x15, [sp, #184]
-;   str x26, [sp, #192]
-;   str x27, [sp, #200]
-;   str x28, [sp, #208]
-;   str x19, [sp, #216]
-;   str x20, [sp, #224]
-;   str x21, [sp, #232]
-;   str x22, [sp, #240]
-;   str x23, [sp, #248]
-;   str x24, [sp, #256]
-;   str x25, [sp, #264]
+;   str x26, [sp, #136]
+;   str x27, [sp, #144]
+;   str x28, [sp, #152]
+;   str x19, [sp, #160]
+;   str x20, [sp, #168]
+;   str x21, [sp, #176]
+;   str x22, [sp, #184]
+;   str x23, [sp, #192]
+;   str x24, [sp, #200]
+;   str x25, [sp, #208]
 ;   mov x1, x2
 ;   ldr x2, [sp]
-;   return_call_ind x1 new_stack_arg_size:160 x2=x2 x3=x3 x4=x4 x5=x5 x6=x6 x7=x7
+;   return_call_ind x1 new_stack_arg_size:112 x2=x2 x3=x3 x4=x4 x5=x5 x6=x6 x7=x7 x9=x9 x10=x10 x11=x11 x12=x12 x13=x13 x14=x14 x15=x15
 ;
 ; Disassembled:
 ; block0: ; offset 0x0
 ;   stp x29, x30, [sp, #-0x10]!
 ;   mov x29, sp
-;   sub sp, sp, #0xa0
-;   ldur x29, [sp, #0xa0]
+;   sub sp, sp, #0x70
+;   ldur x29, [sp, #0x70]
 ;   stp x29, x30, [sp]
 ;   mov x29, sp
 ;   stp x27, x28, [sp, #-0x10]!
@@ -275,16 +268,16 @@ block0:
 ;   mov x5, #0x19
 ;   mov x6, #0x1e
 ;   mov x7, #0x23
-;   mov x0, #0x28
-;   mov x1, #0x2d
-;   mov x8, #0x32
-;   mov x9, #0x37
-;   mov x10, #0x3c
-;   mov x11, #0x41
-;   mov x12, #0x46
-;   mov x13, #0x4b
-;   mov x14, #0x50
-;   mov x15, #0x55
+;   mov x9, #0x28
+;   mov x10, #0x2d
+;   mov x11, #0x32
+;   mov x12, #0x37
+;   mov x13, #0x3c
+;   mov x14, #0x41
+;   mov x15, #0x46
+;   mov x0, #0x4b
+;   mov x1, #0x50
+;   mov x8, #0x55
 ;   mov x26, #0x5a
 ;   mov x27, #0x5f
 ;   mov x28, #0x64
@@ -302,23 +295,16 @@ block0:
 ;   stur x0, [sp, #0x70]
 ;   stur x1, [sp, #0x78]
 ;   stur x8, [sp, #0x80]
-;   stur x9, [sp, #0x88]
-;   stur x10, [sp, #0x90]
-;   stur x11, [sp, #0x98]
-;   stur x12, [sp, #0xa0]
-;   stur x13, [sp, #0xa8]
-;   stur x14, [sp, #0xb0]
-;   stur x15, [sp, #0xb8]
-;   stur x26, [sp, #0xc0]
-;   stur x27, [sp, #0xc8]
-;   stur x28, [sp, #0xd0]
-;   stur x19, [sp, #0xd8]
-;   stur x20, [sp, #0xe0]
-;   stur x21, [sp, #0xe8]
-;   stur x22, [sp, #0xf0]
-;   stur x23, [sp, #0xf8]
-;   str x24, [sp, #0x100]
-;   str x25, [sp, #0x108]
+;   stur x26, [sp, #0x88]
+;   stur x27, [sp, #0x90]
+;   stur x28, [sp, #0x98]
+;   stur x19, [sp, #0xa0]
+;   stur x20, [sp, #0xa8]
+;   stur x21, [sp, #0xb0]
+;   stur x22, [sp, #0xb8]
+;   stur x23, [sp, #0xc0]
+;   stur x24, [sp, #0xc8]
+;   stur x25, [sp, #0xd0]
 ;   mov x1, x2
 ;   ldur x2, [sp]
 ;   add sp, sp, #0x10

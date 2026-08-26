@@ -197,8 +197,19 @@ impl ABIMachineSpec for AArch64MachineDeps {
         // number of register values returned in the other class. That is,
         // we can return values in up to 8 integer and
         // 8 vector registers at once.
-        let max_per_class_reg_vals = 8; // x0-x7 and v0-v7
+        let max_per_class_reg_vals: u8 = 8; // x0-x7 and v0-v7
         let mut remaining_reg_vals = 16;
+
+        // `tail` passes integers in more than AAPCS64's eight, up to `x15`.
+        let (max_xreg_vals, max_vreg_vals): (u8, u8) = match call_conv {
+            isa::CallConv::Tail => (16, max_per_class_reg_vals),
+            _ => (max_per_class_reg_vals, max_per_class_reg_vals),
+        };
+        if call_conv == isa::CallConv::Tail {
+            remaining_reg_vals = 24;
+        }
+        // The next integer register to hand out, skipping the reserved `x8`.
+        let skip_reserved = |n: u8| if call_conv == isa::CallConv::Tail && n == 8 { 9 } else { n };
 
         let ret_area_ptr = if add_ret_area_ptr {
             debug_assert_eq!(args_or_rets, ArgsOrRets::Args);
@@ -301,7 +312,13 @@ impl ABIMachineSpec for AArch64MachineDeps {
                     "Unable to handle non i64 regs"
                 );
 
-                let reg_class_space = max_per_class_reg_vals - next_xreg;
+                next_xreg = skip_reserved(next_xreg);
+                // A split argument needs two consecutive registers, so a pair
+                // that would border the reserved `x8` starts after it instead.
+                if call_conv == isa::CallConv::Tail && next_xreg == 7 {
+                    next_xreg = 9;
+                }
+                let reg_class_space = max_xreg_vals - next_xreg;
                 let reg_space = remaining_reg_vals;
 
                 if reg_space >= 2 && reg_class_space >= 2 {
@@ -339,6 +356,13 @@ impl ABIMachineSpec for AArch64MachineDeps {
             } else {
                 // Single Register parameters
                 let rc = rcs[0];
+                if rc == RegClass::Int {
+                    next_xreg = skip_reserved(next_xreg);
+                }
+                let limit = match rc {
+                    RegClass::Int => max_xreg_vals,
+                    _ => max_vreg_vals,
+                };
                 let next_reg = match rc {
                     RegClass::Int => &mut next_xreg,
                     RegClass::Float => &mut next_vreg,
@@ -349,8 +373,8 @@ impl ABIMachineSpec for AArch64MachineDeps {
                     // Winch uses the first register to return the last result
                     i == params.len() - 1
                 } else {
-                    // Use max_per_class_reg_vals & remaining_reg_vals otherwise
-                    *next_reg < max_per_class_reg_vals && remaining_reg_vals > 0
+                    // Use the class's own cap & remaining_reg_vals otherwise
+                    *next_reg < limit && remaining_reg_vals > 0
                 };
 
                 if push_to_reg {

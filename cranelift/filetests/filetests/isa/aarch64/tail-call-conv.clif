@@ -13,9 +13,9 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v
 ;   stp fp, lr, [sp, #-16]!
 ;   mov fp, sp
 ; block0:
-;   ldr x2, [sp, #168]
+;   ldr x2, [sp, #112]
 ;   ldp fp, lr, [sp], #16
-;   add sp, sp, #160
+;   add sp, sp, #112
 ;   ret
 ;
 ; Disassembled:
@@ -23,9 +23,9 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v
 ;   stp x29, x30, [sp, #-0x10]!
 ;   mov x29, sp
 ; block1: ; offset 0x8
-;   ldur x2, [sp, #0xa8]
+;   ldur x2, [sp, #0x70]
 ;   ldp x29, x30, [sp], #0x10
-;   add sp, sp, #0xa0
+;   add sp, sp, #0x70
 ;   ret
 
 function %tail_caller_stack_args() -> i64 tail {
@@ -70,7 +70,7 @@ block0:
 ;   stp x23, x24, [sp, #-16]!
 ;   stp x21, x22, [sp, #-16]!
 ;   stp x19, x20, [sp, #-16]!
-;   sub sp, sp, #160
+;   sub sp, sp, #112
 ; block0:
 ;   movz x2, #10
 ;   movz x3, #15
@@ -78,16 +78,16 @@ block0:
 ;   movz x5, #25
 ;   movz x6, #30
 ;   movz x7, #35
-;   movz x0, #40
-;   movz x1, #45
-;   movz x8, #50
-;   movz x9, #55
-;   movz x10, #60
-;   movz x11, #65
-;   movz x12, #70
-;   movz x13, #75
-;   movz x14, #80
-;   movz x15, #85
+;   movz x9, #40
+;   movz x10, #45
+;   movz x11, #50
+;   movz x12, #55
+;   movz x13, #60
+;   movz x14, #65
+;   movz x15, #70
+;   movz x0, #75
+;   movz x1, #80
+;   movz x8, #85
 ;   movz x27, #90
 ;   movz x28, #95
 ;   movz x19, #100
@@ -101,26 +101,19 @@ block0:
 ;   str x0, [sp]
 ;   str x1, [sp, #8]
 ;   str x8, [sp, #16]
-;   str x9, [sp, #24]
-;   str x10, [sp, #32]
-;   str x11, [sp, #40]
-;   str x12, [sp, #48]
-;   str x13, [sp, #56]
-;   str x14, [sp, #64]
-;   str x15, [sp, #72]
-;   str x27, [sp, #80]
-;   str x28, [sp, #88]
-;   str x19, [sp, #96]
-;   str x20, [sp, #104]
-;   str x21, [sp, #112]
-;   str x22, [sp, #120]
-;   str x23, [sp, #128]
-;   str x24, [sp, #136]
-;   str x25, [sp, #144]
-;   str x26, [sp, #152]
+;   str x27, [sp, #24]
+;   str x28, [sp, #32]
+;   str x19, [sp, #40]
+;   str x20, [sp, #48]
+;   str x21, [sp, #56]
+;   str x22, [sp, #64]
+;   str x23, [sp, #72]
+;   str x24, [sp, #80]
+;   str x25, [sp, #88]
+;   str x26, [sp, #96]
 ;   load_ext_name_far x0, TestCase(%tail_callee_stack_args)+0
 ;   blr x0
-;   add sp, sp, #160
+;   add sp, sp, #112
 ;   ldp x19, x20, [sp], #16
 ;   ldp x21, x22, [sp], #16
 ;   ldp x23, x24, [sp], #16
@@ -138,7 +131,7 @@ block0:
 ;   stp x23, x24, [sp, #-0x10]!
 ;   stp x21, x22, [sp, #-0x10]!
 ;   stp x19, x20, [sp, #-0x10]!
-;   sub sp, sp, #0xa0
+;   sub sp, sp, #0x70
 ; block1: ; offset 0x20
 ;   mov x2, #0xa
 ;   mov x3, #0xf
@@ -146,16 +139,16 @@ block0:
 ;   mov x5, #0x19
 ;   mov x6, #0x1e
 ;   mov x7, #0x23
-;   mov x0, #0x28
-;   mov x1, #0x2d
-;   mov x8, #0x32
-;   mov x9, #0x37
-;   mov x10, #0x3c
-;   mov x11, #0x41
-;   mov x12, #0x46
-;   mov x13, #0x4b
-;   mov x14, #0x50
-;   mov x15, #0x55
+;   mov x9, #0x28
+;   mov x10, #0x2d
+;   mov x11, #0x32
+;   mov x12, #0x37
+;   mov x13, #0x3c
+;   mov x14, #0x41
+;   mov x15, #0x46
+;   mov x0, #0x4b
+;   mov x1, #0x50
+;   mov x8, #0x55
 ;   mov x27, #0x5a
 ;   mov x28, #0x5f
 ;   mov x19, #0x64
@@ -169,30 +162,23 @@ block0:
 ;   stur x0, [sp]
 ;   stur x1, [sp, #8]
 ;   stur x8, [sp, #0x10]
-;   stur x9, [sp, #0x18]
-;   stur x10, [sp, #0x20]
-;   stur x11, [sp, #0x28]
-;   stur x12, [sp, #0x30]
-;   stur x13, [sp, #0x38]
-;   stur x14, [sp, #0x40]
-;   stur x15, [sp, #0x48]
-;   stur x27, [sp, #0x50]
-;   stur x28, [sp, #0x58]
-;   stur x19, [sp, #0x60]
-;   stur x20, [sp, #0x68]
-;   stur x21, [sp, #0x70]
-;   stur x22, [sp, #0x78]
-;   stur x23, [sp, #0x80]
-;   stur x24, [sp, #0x88]
-;   stur x25, [sp, #0x90]
-;   stur x26, [sp, #0x98]
-;   ldr x0, #0xe0
-;   b #0xe8
+;   stur x27, [sp, #0x18]
+;   stur x28, [sp, #0x20]
+;   stur x19, [sp, #0x28]
+;   stur x20, [sp, #0x30]
+;   stur x21, [sp, #0x38]
+;   stur x22, [sp, #0x40]
+;   stur x23, [sp, #0x48]
+;   stur x24, [sp, #0x50]
+;   stur x25, [sp, #0x58]
+;   stur x26, [sp, #0x60]
+;   ldr x0, #0xc4
+;   b #0xcc
 ;   udf #0 ; reloc_external Abs8 %tail_callee_stack_args 0
 ;   udf #0
 ;   blr x0
-;   sub sp, sp, #0xa0
-;   add sp, sp, #0xa0
+;   sub sp, sp, #0x70
+;   add sp, sp, #0x70
 ;   ldp x19, x20, [sp], #0x10
 ;   ldp x21, x22, [sp], #0x10
 ;   ldp x23, x24, [sp], #0x10
@@ -251,15 +237,15 @@ block0:
 ;   movz x5, #25
 ;   movz x6, #30
 ;   movz x7, #35
-;   movz x0, #40
-;   movz x1, #45
-;   movz x9, #50
-;   movz x10, #55
-;   movz x11, #60
-;   movz x12, #65
-;   movz x13, #70
-;   movz x14, #75
-;   movz x15, #80
+;   movz x9, #40
+;   movz x10, #45
+;   movz x11, #50
+;   movz x12, #55
+;   movz x13, #60
+;   movz x14, #65
+;   movz x15, #70
+;   movz x0, #75
+;   movz x1, #80
 ;   movz x27, #85
 ;   movz x28, #90
 ;   movz x19, #95
@@ -273,24 +259,17 @@ block0:
 ;   movz x2, #135
 ;   str x0, [x8]
 ;   str x1, [x8, #8]
-;   str x9, [x8, #16]
-;   str x10, [x8, #24]
-;   str x11, [x8, #32]
-;   str x12, [x8, #40]
-;   str x13, [x8, #48]
-;   str x14, [x8, #56]
-;   str x15, [x8, #64]
-;   str x27, [x8, #72]
-;   str x28, [x8, #80]
-;   str x19, [x8, #88]
-;   str x20, [x8, #96]
-;   str x21, [x8, #104]
-;   str x22, [x8, #112]
-;   str x23, [x8, #120]
-;   str x24, [x8, #128]
-;   str x25, [x8, #136]
-;   str x26, [x8, #144]
-;   str x2, [x8, #152]
+;   str x27, [x8, #16]
+;   str x28, [x8, #24]
+;   str x19, [x8, #32]
+;   str x20, [x8, #40]
+;   str x21, [x8, #48]
+;   str x22, [x8, #56]
+;   str x23, [x8, #64]
+;   str x24, [x8, #72]
+;   str x25, [x8, #80]
+;   str x26, [x8, #88]
+;   str x2, [x8, #96]
 ;   ldr x2, [sp]
 ;   add sp, sp, #16
 ;   ldp x19, x20, [sp], #16
@@ -319,15 +298,15 @@ block0:
 ;   mov x5, #0x19
 ;   mov x6, #0x1e
 ;   mov x7, #0x23
-;   mov x0, #0x28
-;   mov x1, #0x2d
-;   mov x9, #0x32
-;   mov x10, #0x37
-;   mov x11, #0x3c
-;   mov x12, #0x41
-;   mov x13, #0x46
-;   mov x14, #0x4b
-;   mov x15, #0x50
+;   mov x9, #0x28
+;   mov x10, #0x2d
+;   mov x11, #0x32
+;   mov x12, #0x37
+;   mov x13, #0x3c
+;   mov x14, #0x41
+;   mov x15, #0x46
+;   mov x0, #0x4b
+;   mov x1, #0x50
 ;   mov x27, #0x55
 ;   mov x28, #0x5a
 ;   mov x19, #0x5f
@@ -341,24 +320,17 @@ block0:
 ;   mov x2, #0x87
 ;   stur x0, [x8]
 ;   stur x1, [x8, #8]
-;   stur x9, [x8, #0x10]
-;   stur x10, [x8, #0x18]
-;   stur x11, [x8, #0x20]
-;   stur x12, [x8, #0x28]
-;   stur x13, [x8, #0x30]
-;   stur x14, [x8, #0x38]
-;   stur x15, [x8, #0x40]
-;   stur x27, [x8, #0x48]
-;   stur x28, [x8, #0x50]
-;   stur x19, [x8, #0x58]
-;   stur x20, [x8, #0x60]
-;   stur x21, [x8, #0x68]
-;   stur x22, [x8, #0x70]
-;   stur x23, [x8, #0x78]
-;   stur x24, [x8, #0x80]
-;   stur x25, [x8, #0x88]
-;   stur x26, [x8, #0x90]
-;   stur x2, [x8, #0x98]
+;   stur x27, [x8, #0x10]
+;   stur x28, [x8, #0x18]
+;   stur x19, [x8, #0x20]
+;   stur x20, [x8, #0x28]
+;   stur x21, [x8, #0x30]
+;   stur x22, [x8, #0x38]
+;   stur x23, [x8, #0x40]
+;   stur x24, [x8, #0x48]
+;   stur x25, [x8, #0x50]
+;   stur x26, [x8, #0x58]
+;   stur x2, [x8, #0x60]
 ;   ldur x2, [sp]
 ;   add sp, sp, #0x10
 ;   ldp x19, x20, [sp], #0x10
@@ -385,13 +357,13 @@ block0:
 ;   stp x23, x24, [sp, #-16]!
 ;   stp x21, x22, [sp, #-16]!
 ;   stp x19, x20, [sp, #-16]!
-;   sub sp, sp, #240
+;   sub sp, sp, #144
 ; block0:
 ;   mov x8, sp
 ;   load_ext_name_far x0, TestCase(%tail_callee_stack_rets)+0
 ;   blr x0
-;   ldr x2, [sp, #232]
-;   add sp, sp, #240
+;   ldr x2, [sp, #128]
+;   add sp, sp, #144
 ;   ldp x19, x20, [sp], #16
 ;   ldp x21, x22, [sp], #16
 ;   ldp x23, x24, [sp], #16
@@ -409,7 +381,7 @@ block0:
 ;   stp x23, x24, [sp, #-0x10]!
 ;   stp x21, x22, [sp, #-0x10]!
 ;   stp x19, x20, [sp, #-0x10]!
-;   sub sp, sp, #0xf0
+;   sub sp, sp, #0x90
 ; block1: ; offset 0x20
 ;   mov x8, sp
 ;   ldr x0, #0x2c
@@ -418,37 +390,23 @@ block0:
 ;   udf #0
 ;   blr x0
 ;   ldur x9, [sp]
-;   stur x9, [sp, #0xa0]
+;   stur x9, [sp, #0x70]
 ;   ldur x9, [sp, #8]
-;   stur x9, [sp, #0xa8]
-;   ldur x9, [sp, #0x10]
-;   stur x9, [sp, #0xb0]
-;   ldur x9, [sp, #0x18]
-;   stur x9, [sp, #0xb8]
-;   ldur x9, [sp, #0x20]
-;   stur x9, [sp, #0xc0]
-;   ldur x9, [sp, #0x28]
-;   stur x9, [sp, #0xc8]
-;   ldur x9, [sp, #0x30]
-;   stur x9, [sp, #0xd0]
-;   ldur x9, [sp, #0x38]
-;   stur x9, [sp, #0xd8]
-;   ldur x9, [sp, #0x40]
-;   stur x9, [sp, #0xe0]
-;   ldur x28, [sp, #0x48]
-;   ldur x27, [sp, #0x50]
-;   ldur x26, [sp, #0x58]
-;   ldur x25, [sp, #0x60]
-;   ldur x19, [sp, #0x68]
-;   ldur x20, [sp, #0x70]
-;   ldur x21, [sp, #0x78]
-;   ldur x22, [sp, #0x80]
-;   ldur x23, [sp, #0x88]
-;   ldur x24, [sp, #0x90]
-;   ldur x9, [sp, #0x98]
-;   stur x9, [sp, #0xe8]
-;   ldur x2, [sp, #0xe8]
-;   add sp, sp, #0xf0
+;   stur x9, [sp, #0x78]
+;   ldur x28, [sp, #0x10]
+;   ldur x27, [sp, #0x18]
+;   ldur x26, [sp, #0x20]
+;   ldur x25, [sp, #0x28]
+;   ldur x19, [sp, #0x30]
+;   ldur x20, [sp, #0x38]
+;   ldur x21, [sp, #0x40]
+;   ldur x22, [sp, #0x48]
+;   ldur x23, [sp, #0x50]
+;   ldur x24, [sp, #0x58]
+;   ldur x9, [sp, #0x60]
+;   stur x9, [sp, #0x80]
+;   ldur x2, [sp, #0x80]
+;   add sp, sp, #0x90
 ;   ldp x19, x20, [sp], #0x10
 ;   ldp x21, x22, [sp], #0x10
 ;   ldp x23, x24, [sp], #0x10
@@ -475,48 +433,34 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v
 ;   stp x19, x20, [sp, #-16]!
 ;   sub sp, sp, #16
 ; block0:
-;   str x7, [sp]
-;   ldr x7, [sp, #112]
-;   ldr x28, [sp, #120]
-;   ldr x26, [sp, #128]
-;   ldr x24, [sp, #136]
+;   str x14, [sp]
+;   ldr x14, [sp, #112]
+;   ldr x27, [sp, #120]
+;   ldr x25, [sp, #128]
+;   ldr x23, [sp, #136]
 ;   ldr x22, [sp, #144]
-;   ldr x20, [sp, #152]
-;   ldr x19, [sp, #160]
-;   ldr x21, [sp, #168]
-;   ldr x23, [sp, #176]
-;   ldr x25, [sp, #184]
-;   ldr x27, [sp, #192]
-;   ldr x15, [sp, #200]
-;   ldr x14, [sp, #208]
-;   ldr x13, [sp, #216]
-;   ldr x12, [sp, #224]
-;   ldr x11, [sp, #232]
-;   ldr x10, [sp, #240]
-;   ldr x9, [sp, #248]
-;   ldr x1, [sp, #256]
-;   ldr x0, [sp, #264]
-;   str x7, [x8]
-;   str x28, [x8, #8]
-;   str x26, [x8, #16]
-;   str x24, [x8, #24]
+;   ldr x24, [sp, #152]
+;   ldr x26, [sp, #160]
+;   ldr x28, [sp, #168]
+;   ldr x21, [sp, #176]
+;   ldr x20, [sp, #184]
+;   ldr x19, [sp, #192]
+;   ldr x1, [sp, #200]
+;   ldr x0, [sp, #208]
+;   str x14, [x8]
+;   str x27, [x8, #8]
+;   str x25, [x8, #16]
+;   str x23, [x8, #24]
 ;   str x22, [x8, #32]
-;   str x20, [x8, #40]
-;   str x19, [x8, #48]
-;   str x21, [x8, #56]
-;   str x23, [x8, #64]
-;   str x25, [x8, #72]
-;   str x27, [x8, #80]
-;   str x15, [x8, #88]
-;   str x14, [x8, #96]
-;   str x13, [x8, #104]
-;   str x12, [x8, #112]
-;   str x11, [x8, #120]
-;   str x10, [x8, #128]
-;   str x9, [x8, #136]
-;   str x1, [x8, #144]
-;   str x0, [x8, #152]
-;   ldr x7, [sp]
+;   str x24, [x8, #40]
+;   str x26, [x8, #48]
+;   str x28, [x8, #56]
+;   str x21, [x8, #64]
+;   str x20, [x8, #72]
+;   str x19, [x8, #80]
+;   str x1, [x8, #88]
+;   str x0, [x8, #96]
+;   ldr x14, [sp]
 ;   add sp, sp, #16
 ;   ldp x19, x20, [sp], #16
 ;   ldp x21, x22, [sp], #16
@@ -524,7 +468,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v
 ;   ldp x25, x26, [sp], #16
 ;   ldp x27, x28, [sp], #16
 ;   ldp fp, lr, [sp], #16
-;   add sp, sp, #160
+;   add sp, sp, #112
 ;   ret
 ;
 ; Disassembled:
@@ -538,48 +482,34 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v
 ;   stp x19, x20, [sp, #-0x10]!
 ;   sub sp, sp, #0x10
 ; block1: ; offset 0x20
-;   stur x7, [sp]
-;   ldur x7, [sp, #0x70]
-;   ldur x28, [sp, #0x78]
-;   ldur x26, [sp, #0x80]
-;   ldur x24, [sp, #0x88]
+;   stur x14, [sp]
+;   ldur x14, [sp, #0x70]
+;   ldur x27, [sp, #0x78]
+;   ldur x25, [sp, #0x80]
+;   ldur x23, [sp, #0x88]
 ;   ldur x22, [sp, #0x90]
-;   ldur x20, [sp, #0x98]
-;   ldur x19, [sp, #0xa0]
-;   ldur x21, [sp, #0xa8]
-;   ldur x23, [sp, #0xb0]
-;   ldur x25, [sp, #0xb8]
-;   ldur x27, [sp, #0xc0]
-;   ldur x15, [sp, #0xc8]
-;   ldur x14, [sp, #0xd0]
-;   ldur x13, [sp, #0xd8]
-;   ldur x12, [sp, #0xe0]
-;   ldur x11, [sp, #0xe8]
-;   ldur x10, [sp, #0xf0]
-;   ldur x9, [sp, #0xf8]
-;   ldr x1, [sp, #0x100]
-;   ldr x0, [sp, #0x108]
-;   stur x7, [x8]
-;   stur x28, [x8, #8]
-;   stur x26, [x8, #0x10]
-;   stur x24, [x8, #0x18]
+;   ldur x24, [sp, #0x98]
+;   ldur x26, [sp, #0xa0]
+;   ldur x28, [sp, #0xa8]
+;   ldur x21, [sp, #0xb0]
+;   ldur x20, [sp, #0xb8]
+;   ldur x19, [sp, #0xc0]
+;   ldur x1, [sp, #0xc8]
+;   ldur x0, [sp, #0xd0]
+;   stur x14, [x8]
+;   stur x27, [x8, #8]
+;   stur x25, [x8, #0x10]
+;   stur x23, [x8, #0x18]
 ;   stur x22, [x8, #0x20]
-;   stur x20, [x8, #0x28]
-;   stur x19, [x8, #0x30]
-;   stur x21, [x8, #0x38]
-;   stur x23, [x8, #0x40]
-;   stur x25, [x8, #0x48]
-;   stur x27, [x8, #0x50]
-;   stur x15, [x8, #0x58]
-;   stur x14, [x8, #0x60]
-;   stur x13, [x8, #0x68]
-;   stur x12, [x8, #0x70]
-;   stur x11, [x8, #0x78]
-;   stur x10, [x8, #0x80]
-;   stur x9, [x8, #0x88]
-;   stur x1, [x8, #0x90]
-;   stur x0, [x8, #0x98]
-;   ldur x7, [sp]
+;   stur x24, [x8, #0x28]
+;   stur x26, [x8, #0x30]
+;   stur x28, [x8, #0x38]
+;   stur x21, [x8, #0x40]
+;   stur x20, [x8, #0x48]
+;   stur x19, [x8, #0x50]
+;   stur x1, [x8, #0x58]
+;   stur x0, [x8, #0x60]
+;   ldur x14, [sp]
 ;   add sp, sp, #0x10
 ;   ldp x19, x20, [sp], #0x10
 ;   ldp x21, x22, [sp], #0x10
@@ -587,7 +517,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v
 ;   ldp x25, x26, [sp], #0x10
 ;   ldp x27, x28, [sp], #0x10
 ;   ldp x29, x30, [sp], #0x10
-;   add sp, sp, #0xa0
+;   add sp, sp, #0x70
 ;   ret
 
 function %tail_caller_stack_args_and_rets() -> i64 tail {
@@ -632,7 +562,7 @@ block0:
 ;   stp x23, x24, [sp, #-16]!
 ;   stp x21, x22, [sp, #-16]!
 ;   stp x19, x20, [sp, #-16]!
-;   sub sp, sp, #400
+;   sub sp, sp, #256
 ; block0:
 ;   movz x2, #10
 ;   movz x3, #15
@@ -640,16 +570,16 @@ block0:
 ;   movz x5, #25
 ;   movz x6, #30
 ;   movz x7, #35
-;   movz x0, #40
-;   movz x1, #45
-;   movz x8, #50
-;   movz x9, #55
-;   movz x10, #60
-;   movz x11, #65
-;   movz x12, #70
-;   movz x13, #75
-;   movz x14, #80
-;   movz x15, #85
+;   movz x9, #40
+;   movz x10, #45
+;   movz x11, #50
+;   movz x12, #55
+;   movz x13, #60
+;   movz x14, #65
+;   movz x15, #70
+;   movz x0, #75
+;   movz x1, #80
+;   movz x8, #85
 ;   movz x19, #90
 ;   movz x20, #95
 ;   movz x21, #100
@@ -663,28 +593,21 @@ block0:
 ;   str x0, [sp]
 ;   str x1, [sp, #8]
 ;   str x8, [sp, #16]
-;   str x9, [sp, #24]
-;   str x10, [sp, #32]
-;   str x11, [sp, #40]
-;   str x12, [sp, #48]
-;   str x13, [sp, #56]
-;   str x14, [sp, #64]
-;   str x15, [sp, #72]
-;   str x19, [sp, #80]
-;   str x20, [sp, #88]
-;   str x21, [sp, #96]
-;   str x22, [sp, #104]
-;   str x23, [sp, #112]
-;   str x24, [sp, #120]
-;   str x25, [sp, #128]
-;   str x26, [sp, #136]
-;   str x27, [sp, #144]
-;   str x28, [sp, #152]
-;   add x8, sp, #160
-;   load_ext_name_far x11, TestCase(%tail_callee_stack_args_and_rets)+0
-;   blr x11
-;   ldr x2, [sp, #392]
-;   add sp, sp, #400
+;   str x19, [sp, #24]
+;   str x20, [sp, #32]
+;   str x21, [sp, #40]
+;   str x22, [sp, #48]
+;   str x23, [sp, #56]
+;   str x24, [sp, #64]
+;   str x25, [sp, #72]
+;   str x26, [sp, #80]
+;   str x27, [sp, #88]
+;   str x28, [sp, #96]
+;   add x8, sp, #112
+;   load_ext_name_far x0, TestCase(%tail_callee_stack_args_and_rets)+0
+;   blr x0
+;   ldr x2, [sp, #240]
+;   add sp, sp, #256
 ;   ldp x19, x20, [sp], #16
 ;   ldp x21, x22, [sp], #16
 ;   ldp x23, x24, [sp], #16
@@ -702,7 +625,7 @@ block0:
 ;   stp x23, x24, [sp, #-0x10]!
 ;   stp x21, x22, [sp, #-0x10]!
 ;   stp x19, x20, [sp, #-0x10]!
-;   sub sp, sp, #0x190
+;   sub sp, sp, #0x100
 ; block1: ; offset 0x20
 ;   mov x2, #0xa
 ;   mov x3, #0xf
@@ -710,16 +633,16 @@ block0:
 ;   mov x5, #0x19
 ;   mov x6, #0x1e
 ;   mov x7, #0x23
-;   mov x0, #0x28
-;   mov x1, #0x2d
-;   mov x8, #0x32
-;   mov x9, #0x37
-;   mov x10, #0x3c
-;   mov x11, #0x41
-;   mov x12, #0x46
-;   mov x13, #0x4b
-;   mov x14, #0x50
-;   mov x15, #0x55
+;   mov x9, #0x28
+;   mov x10, #0x2d
+;   mov x11, #0x32
+;   mov x12, #0x37
+;   mov x13, #0x3c
+;   mov x14, #0x41
+;   mov x15, #0x46
+;   mov x0, #0x4b
+;   mov x1, #0x50
+;   mov x8, #0x55
 ;   mov x19, #0x5a
 ;   mov x20, #0x5f
 ;   mov x21, #0x64
@@ -733,62 +656,41 @@ block0:
 ;   stur x0, [sp]
 ;   stur x1, [sp, #8]
 ;   stur x8, [sp, #0x10]
-;   stur x9, [sp, #0x18]
-;   stur x10, [sp, #0x20]
-;   stur x11, [sp, #0x28]
-;   stur x12, [sp, #0x30]
-;   stur x13, [sp, #0x38]
-;   stur x14, [sp, #0x40]
-;   stur x15, [sp, #0x48]
-;   stur x19, [sp, #0x50]
-;   stur x20, [sp, #0x58]
-;   stur x21, [sp, #0x60]
-;   stur x22, [sp, #0x68]
-;   stur x23, [sp, #0x70]
-;   stur x24, [sp, #0x78]
-;   stur x25, [sp, #0x80]
-;   stur x26, [sp, #0x88]
-;   stur x27, [sp, #0x90]
-;   stur x28, [sp, #0x98]
-;   add x8, sp, #0xa0
-;   ldr x11, #0xe4
-;   b #0xec
+;   stur x19, [sp, #0x18]
+;   stur x20, [sp, #0x20]
+;   stur x21, [sp, #0x28]
+;   stur x22, [sp, #0x30]
+;   stur x23, [sp, #0x38]
+;   stur x24, [sp, #0x40]
+;   stur x25, [sp, #0x48]
+;   stur x26, [sp, #0x50]
+;   stur x27, [sp, #0x58]
+;   stur x28, [sp, #0x60]
+;   add x8, sp, #0x70
+;   ldr x0, #0xc8
+;   b #0xd0
 ;   udf #0 ; reloc_external Abs8 %tail_callee_stack_args_and_rets 0
 ;   udf #0
-;   blr x11
-;   sub sp, sp, #0xa0
-;   ldur x9, [sp, #0xa0]
-;   str x9, [sp, #0x140]
-;   ldur x9, [sp, #0xa8]
-;   str x9, [sp, #0x148]
-;   ldur x9, [sp, #0xb0]
-;   str x9, [sp, #0x150]
-;   ldur x9, [sp, #0xb8]
-;   str x9, [sp, #0x158]
-;   ldur x9, [sp, #0xc0]
-;   str x9, [sp, #0x160]
-;   ldur x9, [sp, #0xc8]
-;   str x9, [sp, #0x168]
+;   blr x0
+;   sub sp, sp, #0x70
+;   ldur x9, [sp, #0x70]
+;   stur x9, [sp, #0xe0]
+;   ldur x9, [sp, #0x78]
+;   stur x9, [sp, #0xe8]
+;   ldur x28, [sp, #0x80]
+;   ldur x27, [sp, #0x88]
+;   ldur x26, [sp, #0x90]
+;   ldur x25, [sp, #0x98]
+;   ldur x19, [sp, #0xa0]
+;   ldur x20, [sp, #0xa8]
+;   ldur x21, [sp, #0xb0]
+;   ldur x22, [sp, #0xb8]
+;   ldur x23, [sp, #0xc0]
+;   ldur x24, [sp, #0xc8]
 ;   ldur x9, [sp, #0xd0]
-;   str x9, [sp, #0x170]
-;   ldur x9, [sp, #0xd8]
-;   str x9, [sp, #0x178]
-;   ldur x9, [sp, #0xe0]
-;   str x9, [sp, #0x180]
-;   ldur x28, [sp, #0xe8]
-;   ldur x27, [sp, #0xf0]
-;   ldur x26, [sp, #0xf8]
-;   ldr x25, [sp, #0x100]
-;   ldr x19, [sp, #0x108]
-;   ldr x20, [sp, #0x110]
-;   ldr x21, [sp, #0x118]
-;   ldr x22, [sp, #0x120]
-;   ldr x23, [sp, #0x128]
-;   ldr x24, [sp, #0x130]
-;   ldr x9, [sp, #0x138]
-;   str x9, [sp, #0x188]
-;   ldr x2, [sp, #0x188]
-;   add sp, sp, #0x190
+;   stur x9, [sp, #0xf0]
+;   ldur x2, [sp, #0xf0]
+;   add sp, sp, #0x100
 ;   ldp x19, x20, [sp], #0x10
 ;   ldp x21, x22, [sp], #0x10
 ;   ldp x23, x24, [sp], #0x10
