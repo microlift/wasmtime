@@ -6,8 +6,8 @@
 
 use crate::abi::RetArea;
 use crate::codegen::{
-    Callee, CodeGen, CodeGenError, ConditionalBranch, ControlStackFrame, Emission, FnCall,
-    UnconditionalBranch, control_index,
+    Callee, CatchInfo, CodeGen, CodeGenError, ConditionalBranch, ControlStackFrame, Emission,
+    FnCall, TryTableInfo, UnconditionalBranch, control_index,
 };
 use crate::masm::{
     AtomicWaitKind, DivKind, Extend, ExtractLaneKind, FloatCmpKind, IntCmpKind, LoadKind,
@@ -20,16 +20,17 @@ use crate::masm::{
 use crate::reg::{Reg, writable};
 use crate::stack::{TypedReg, Val};
 use crate::{Result, bail, format_err};
+use cranelift_codegen::ir::ExceptionTag;
 use regalloc2::RegClass;
 use smallvec::{SmallVec, smallvec};
 use wasmparser::{
     BlockType, BrTable, HeapType, Ieee32, Ieee64, MemArg, TryTable, V128, ValType, VisitOperator,
     VisitSimdOperator,
 };
-use wasmtime_cranelift::{TRAP_INDIRECT_CALL_TO_NULL, TRAP_UNHANDLED_TAG};
+use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TypeIndex, WasmHeapType,
-    WasmValType,
+    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TagIndex, TypeIndex,
+    WasmCompositeInnerType, WasmHeapType, WasmValType,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -1511,7 +1512,11 @@ where
             self.handle_unreachable_end()
         } else {
             let mut control = self.pop_control_frame()?;
-            control.emit_end(self.masm, &mut self.context)
+            if let Some(info) = control.take_try_table_info() {
+                self.emit_try_table_end(control, info)
+            } else {
+                control.emit_end(self.masm, &mut self.context)
+            }
         }
     }
 
@@ -1848,12 +1853,44 @@ where
         Ok(())
     }
 
-    // Exceptions currently trap on throw, so a `try_table` compiles like
-    // a `block`. The catch clauses are unreachable and no handler metadata
-    // is emitted.
+    // Record the handlers that apply to calls within this `try_table`. Their
+    // landing pads are emitted when the control frame ends.
     fn visit_try_table(&mut self, try_table: TryTable) -> Self::Output {
-        self.control_frames.push(ControlStackFrame::block(
+        let checkpoint = self.context.exception_handlers.take_checkpoint();
+        let mut catches = Vec::with_capacity(try_table.catches.len());
+
+        for catch in try_table.catches.iter().rev() {
+            let (tag, target_depth) = match catch {
+                wasmparser::Catch::One { tag, label } => (Some(TagIndex::from_u32(*tag)), *label),
+                wasmparser::Catch::All { label } => (None, *label),
+                wasmparser::Catch::OneRef { .. } | wasmparser::Catch::AllRef { .. } => {
+                    bail!(CodeGenError::unimplemented_wasm_instruction())
+                }
+            };
+
+            let landing_pad = self.masm.get_label()?;
+
+            let target = control_index(target_depth, self.control_frames.len())?;
+            self.control_frames[target].set_as_target();
+
+            let exception_tag = tag.map(|tag| ExceptionTag::from_u32(tag.as_u32()));
+            self.context
+                .exception_handlers
+                .add_handler(exception_tag, landing_pad);
+
+            catches.push(CatchInfo {
+                tag,
+                target_depth,
+                landing_pad,
+            });
+        }
+        let info = TryTableInfo {
+            checkpoint,
+            catches,
+        };
+        self.control_frames.push(ControlStackFrame::try_table(
             self.env.resolve_block_sig(try_table.ty)?,
+            info,
             self.masm,
             &mut self.context,
         )?);
@@ -1861,25 +1898,44 @@ where
         Ok(())
     }
 
-    // A thrown exception is compiled as an unhandled-tag trap; see
-    // `visit_try_table`.
-    fn visit_throw(&mut self, _tag_index: u32) -> Self::Output {
-        self.masm.trap(TRAP_UNHANDLED_TAG)?;
-        self.context.reachable = false;
-        let outermost = &mut self.control_frames[0];
-        outermost.set_as_target();
+    fn visit_throw(&mut self, tag_index: u32) -> Self::Output {
+        let tag_index = TagIndex::from_u32(tag_index);
+        let interned = self.env.translation.module.tags[tag_index]
+            .exception
+            .unwrap_module_type_index();
+        let types = self.env.types;
+        let exn_ty = match &types[interned].composite_type.inner {
+            WasmCompositeInnerType::Exn(exn_ty) => exn_ty,
+            _ => return Err(format_err!(CodeGenError::unsupported_wasm_type())),
+        };
+        let layouts = self.require_gc_codegen_config().layouts();
 
-        Ok(())
+        let layout = layouts
+            .exn_layout(exn_ty)
+            .map_err(|_| format_err!(CodeGenError::unsupported_wasm_type()))?;
+
+        let (gc_ref, object_addr) =
+            self.emit_exception_alloc(tag_index, interned, &layout, layouts)?;
+        let gc_ref =
+            self.emit_store_exception_payload_fields(exn_ty, &layout, gc_ref, object_addr)?;
+        self.context.stack.push(gc_ref.into());
+        self.visit_throw_ref()
     }
 
-    // A rethrown exception is compiled as an unhandled-tag trap; see
-    // `visit_try_table`.
+    // The exception reference is on top of the value stack. Forward it to the
+    // runtime, then mark the remaining Wasm code unreachable because throwing
+    // does not return to this function.
     fn visit_throw_ref(&mut self) -> Self::Output {
-        self.masm.trap(TRAP_UNHANDLED_TAG)?;
+        let throw_ref = self.env.builtins.throw_ref::<M::ABI>()?;
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(throw_ref),
+        )?;
         self.context.reachable = false;
         let outermost = &mut self.control_frames[0];
         outermost.set_as_target();
-
         Ok(())
     }
 
@@ -2104,14 +2160,14 @@ where
         let index = GlobalIndex::from_u32(global_index);
         let (ty, base, offset) = self.emit_get_global_addr(index)?;
         let addr = self.masm.address_at_reg(base, offset)?;
-        if self.gc_barrier_needed(&ty) {
-            self.emit_drc_read_barrier(ty, base, addr)?;
-        } else {
-            let gc_ref = self.context.reg_for_type(ty, self.masm)?;
-            self.masm.load(addr, writable!(gc_ref), ty.try_into()?)?;
-            self.context.stack.push(Val::reg(gc_ref, ty));
+        let gc_ref = self.context.reg_for_type(ty, self.masm)?;
+        self.masm.load(addr, writable!(gc_ref), ty.try_into()?)?;
+        self.context.free_reg(base);
 
-            self.context.free_reg(base);
+        if self.gc_barrier_needed(&ty) {
+            self.emit_drc_read_barrier(ty, gc_ref)?;
+        } else {
+            self.context.stack.push(Val::reg(gc_ref, ty));
         }
 
         Ok(())

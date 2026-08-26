@@ -127,6 +127,7 @@ async fn run_cli(path: &str, server: &Server) -> wasmtime::Result<()> {
         Ctx {
             wasi: wasmtime_wasi::WasiCtx::builder()
                 .env("HTTP_SERVER", server.addr())
+                .inherit_stdio()
                 .build(),
             ..Ctx::new(oneshot::channel().0)
         },
@@ -359,6 +360,75 @@ async fn compose(a: &[u8], b: &[u8]) -> Result<Vec<u8>> {
     )
     .compose()
     .to_wasmtime_result()
+}
+
+/// Test that an error reported by `consume-body` is propagated up through
+/// the middleware.
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p3_http_middleware_error() -> Result<()> {
+    _ = env_logger::try_init();
+
+    let echo = &fs::read(P3_HTTP_ECHO_COMPONENT).await?;
+    let middleware = &fs::read(P3_HTTP_MIDDLEWARE_COMPONENT).await?;
+    let inner = compose(middleware, echo).await?;
+    let composed = compose(middleware, &inner).await?;
+
+    let tempdir = tempfile::tempdir()?;
+    let path = tempdir.path().join("temp.wasm");
+    fs::write(&path, &composed).await?;
+
+    let (mut body_tx, body_rx) = futures::channel::mpsc::channel::<Result<_, ErrorCode>>(1);
+    // Add a header which will trigger the echo service to record a transmission
+    // error and never deliver a response.
+    let request = http::Request::builder()
+        .uri("http://localhost/")
+        .method(http::Method::GET)
+        .header("inject-transmission-error", "true");
+
+    let response = futures::join!(
+        async {
+            let result = run_http(
+                path.to_str().unwrap(),
+                request.body(http_body_util::StreamBody::new(body_rx))?,
+                oneshot::channel().0,
+            )
+            .await;
+            result
+        },
+        async {
+            body_tx
+                .send(Ok(http_body::Frame::data(Bytes::from_static(
+                    b"And the mome raths outgrabe",
+                ))))
+                .await
+                .unwrap();
+            body_tx
+                .send(Ok(http_body::Frame::trailers({
+                    let mut trailers = http::HeaderMap::new();
+                    assert!(
+                        trailers
+                            .insert("fizz", http::HeaderValue::from_static("buzz"))
+                            .is_none()
+                    );
+                    trailers
+                })))
+                .await
+                .unwrap();
+            drop(body_tx);
+        }
+    )
+    .0;
+
+    let err = response.unwrap_err();
+    let expected_err = "Injected error by echo service";
+    // Even though the echo service never replied, we can read the transmission
+    // error on the future from `request.new`.
+    assert!(
+        format!("{err:#}").contains(expected_err),
+        "Resulting error {err:#} does not contain expected message {expected_err}"
+    );
+
+    Ok(())
 }
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
@@ -869,4 +939,10 @@ async fn p3_http_empty_frames_interleaved() -> Result<()> {
     let collected_body = collected_body.to_bytes();
     assert_eq!(collected_body, b"hello world".as_slice());
     Ok(())
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p3_http_outbound_request_chunk_size() -> Result<()> {
+    let server = Server::http1(1)?;
+    run_cli(P3_HTTP_OUTBOUND_REQUEST_CHUNK_SIZE_COMPONENT, &server).await
 }

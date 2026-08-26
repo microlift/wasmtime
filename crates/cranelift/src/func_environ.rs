@@ -37,12 +37,12 @@ use wasmtime_environ::{
     BuiltinFunctionIndex, ComponentPC, ConstExpr, ConstOp, DataIndex, DefinedFuncIndex,
     DefinedGlobalIndex, DefinedTableIndex, ElemIndex, EngineOrModuleTypeIndex, FactInlineIntrinsic,
     FrameStateSlotBuilder, FrameValType, FuncIndex, FuncKey, GlobalConstValue, GlobalIndex,
-    IndexType, KnownFunc, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset, MemoryTunables,
-    Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
-    NUM_COMPONENT_CONTEXT_SLOTS, PassiveElemIndex, PtrSize, RuntimeDataIndex, Table, TableIndex,
-    TableInitialValue, TableSegment, TableSegmentElements, TagIndex, Tunables, TypeConvert,
-    TypeIndex, VMOffsets, WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType,
-    WasmRefType, WasmResult, WasmStorageType, WasmValType,
+    IndexType, KnownFunc, KnownGlobal, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset,
+    MemoryTunables, Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
+    PassiveElemIndex, RuntimeDataIndex, Table, TableIndex, TableInitialValue, TableSegment,
+    TableSegmentElements, TagIndex, Tunables, TypeConvert, TypeIndex, VMOffsets,
+    WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType, WasmRefType, WasmResult,
+    WasmStorageType, WasmValType,
 };
 use wasmtime_environ::{FUNCREF_INIT_BIT, FUNCREF_MASK};
 
@@ -236,7 +236,7 @@ pub struct FuncEnvironment<'module_environment> {
     /// carries no hints.
     branch_hints: Option<Peekable<SectionLimitedIntoIter<'module_environment, BranchHint>>>,
     /// Module-relative byte offset of the current function body's start.
-    func_body_offset: usize,
+    func_body_offset: u64,
 
     /// Cached alias regions for alias analysis.
     pub(crate) alias_regions: AliasRegions<VMOffsets<u8>>,
@@ -250,7 +250,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         wasm_func_ty: &'module_environment WasmFuncType,
         key: FuncKey,
         func_index: Option<FuncIndex>,
-        func_body_offset: usize,
+        func_body_offset: u64,
     ) -> Self {
         let tunables = compiler.tunables();
         let builtin_functions = BuiltinFunctions::new(compiler);
@@ -316,7 +316,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     /// Consume the branch hint for the instruction at module-relative `offset`
     /// (i.e. `builder.srcloc().bits()`), if any. The lazy decoder only moves
     /// forward, making this O(n) over a function body.
-    pub(crate) fn take_branch_hint(&mut self, offset: usize) -> Option<BranchHint> {
+    pub(crate) fn take_branch_hint(&mut self, offset: u64) -> Option<BranchHint> {
         // Fast path: no hints (always so when the proposal is off), and this
         // runs for every `if`/`br_if`.
         let hints = self.branch_hints.as_mut()?;
@@ -342,70 +342,126 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         self.isa.pointer_type()
     }
 
+    /// Get the alias region to use for accesses of the given memory.
+    ///
+    /// XXX: Keep the `{memory,global,table}_alias_region` methods in sync with
+    /// each other.
     pub(crate) fn memory_alias_region(
         &mut self,
         func: &mut Function,
         memory: MemoryIndex,
     ) -> ir::AliasRegion {
-        if self.module.is_exported_memory(memory) {
-            // A function that operates on an exported defined memory can be
-            // inlined into a different module caller, where that that caller's
-            // module also imports that exported memory. That caller will access
-            // the memory with `AliasRegionKey::PublicMemory`, so we must also
-            // conservatively do the same here, even though we potentially know
-            // the precise static module index and defined memory index, because
-            // memory accessed with two different alias regions must not
-            // actually alias, or else we will get miscompiles.
-            self.alias_regions.public_memory_region(func)
-        } else {
-            match self.module.defined_memory_index(memory) {
-                Some(def) => self.alias_regions.defined_memory_region(
-                    func,
-                    self.translation.module_index(),
-                    def,
-                ),
-                None => self.alias_regions.public_memory_region(func),
+        match self.module.defined_memory_index(memory) {
+            // A memory defined by this module. When it is exported, a function
+            // that operates on it can be inlined into a caller in a different
+            // module that imports that memory, and vice versa. That other module
+            // accesses the memory with `AliasRegionKey::PublicMemory` unless it
+            // statically knows that its import is always this memory, so we can
+            // only use this memory's precise region when every module that may
+            // import it does know that. Memory accessed with two different alias
+            // regions must not actually alias, or else we will get miscompiles.
+            Some(def) => {
+                if self.module.is_exported_memory(memory)
+                    && !self.translation.memories_known_to_importers.contains(def)
+                {
+                    self.alias_regions.public_memory_region(func)
+                } else {
+                    self.alias_regions.defined_memory_region(
+                        func,
+                        self.translation.module_index(),
+                        def,
+                    )
+                }
             }
+
+            // A memory imported by this module: use the precise region when we
+            // statically know which defined memory always satisfies the import
+            // and everything else that imports it knows the same.
+            None => match self.translation.known_imported_memories[memory] {
+                Some(known) => {
+                    self.alias_regions
+                        .defined_memory_region(func, known.module, known.index)
+                }
+                None => self.alias_regions.public_memory_region(func),
+            },
         }
     }
 
+    /// Get the alias region to use for accesses of the given table.
+    ///
+    /// XXX: Keep the `{memory,global,table}_alias_region` methods in sync with
+    /// each other.
     pub(crate) fn table_alias_region(
         &mut self,
         func: &mut Function,
         table: TableIndex,
     ) -> ir::AliasRegion {
-        if self.module.is_exported_table(table) {
-            // See the comment in `memory_alias_region` for details.
-            self.alias_regions.public_table_region(func)
-        } else {
-            match self.module.defined_table_index(table) {
-                Some(def) => self.alias_regions.defined_table_region(
-                    func,
-                    self.translation.module_index(),
-                    def,
-                ),
-                None => self.alias_regions.public_table_region(func),
+        // See the comments in `memory_alias_region` for details.
+        match self.module.defined_table_index(table) {
+            Some(def) => {
+                if self.module.is_exported_table(table)
+                    && !self.translation.tables_known_to_importers.contains(def)
+                {
+                    self.alias_regions.public_table_region(func)
+                } else {
+                    self.alias_regions.defined_table_region(
+                        func,
+                        self.translation.module_index(),
+                        def,
+                    )
+                }
             }
+            None => match self.translation.known_imported_tables[table] {
+                Some(known) => {
+                    self.alias_regions
+                        .defined_table_region(func, known.module, known.index)
+                }
+                None => self.alias_regions.public_table_region(func),
+            },
         }
     }
 
+    /// Get the alias region to use for accesses of the given global.
+    ///
+    /// XXX: Keep the `{memory,global,table}_alias_region` methods in sync with
+    /// each other.
     pub(crate) fn global_alias_region(
         &mut self,
         func: &mut Function,
         global: GlobalIndex,
     ) -> ir::AliasRegion {
-        if self.module.is_exported_global(global) {
-            // See the comment in `memory_alias_region` for details.
-            self.alias_regions.public_global_region(func)
-        } else {
-            match self.module.defined_global_index(global) {
-                Some(def) => self.alias_regions.defined_global_region(
-                    func,
-                    self.translation.module_index(),
-                    def,
-                ),
-                None => self.alias_regions.public_global_region(func),
+        // See the comments in `memory_alias_region` for details.
+        match self.module.defined_global_index(global) {
+            Some(def) => {
+                if self.module.is_exported_global(global)
+                    && !self.translation.globals_known_to_importers.contains(def)
+                {
+                    self.alias_regions.public_global_region(func)
+                } else {
+                    self.alias_regions.defined_global_region(
+                        func,
+                        self.translation.module_index(),
+                        def,
+                    )
+                }
             }
+            None => match self.translation.known_imported_globals[global] {
+                Some(KnownGlobal::Defined(known)) => {
+                    self.alias_regions
+                        .defined_global_region(func, known.module, known.index)
+                }
+                Some(KnownGlobal::ComponentInstanceFlags(instance)) => self
+                    .alias_regions
+                    .vmcomponent()
+                    .may_leave(instance)
+                    .region(func),
+                Some(KnownGlobal::TaskMayBlock) => self
+                    .alias_regions
+                    .vmcomponent()
+                    .task_may_block()
+                    .region(func),
+                None => self.alias_regions.public_global_region(func),
+            },
         }
     }
 
@@ -611,7 +667,9 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         let vmstore_ctx = self.get_vmstore_context_ptr(builder);
         let fuel = self
             .alias_regions
-            .vmstore_context_fuel_consumed(&mut builder.cursor(), vmstore_ctx);
+            .vm_store_context()
+            .fuel_consumed()
+            .load(&mut builder.cursor(), vmstore_ctx);
         builder.def_var(self.fuel_var, fuel);
     }
 
@@ -620,7 +678,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     fn fuel_save_from_var(&mut self, builder: &mut FunctionBuilder<'_>) {
         let vmstore_ctx = self.get_vmstore_context_ptr(builder);
         let fuel_consumed = builder.use_var(self.fuel_var);
-        self.alias_regions.store_vmstore_context_fuel_consumed(
+        self.alias_regions.vm_store_context().fuel_consumed().store(
             &mut builder.cursor(),
             vmstore_ctx,
             fuel_consumed,
@@ -803,7 +861,9 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         let vmstore_ctx = self.get_vmstore_context_ptr(builder);
         let deadline = self
             .alias_regions
-            .vmstore_context_epoch_deadline(&mut builder.cursor(), vmstore_ctx);
+            .vm_store_context()
+            .epoch_deadline()
+            .load(&mut builder.cursor(), vmstore_ctx);
         builder.def_var(self.epoch_deadline_var, deadline);
         self.epoch_check_cached(builder, cur_epoch_value, continuation_block);
 
@@ -1561,12 +1621,13 @@ impl FuncEnvironment<'_> {
                     .vmctx()
                     .memories(def_index)
                     .to_deferred_load(func);
-                let mut base = self.alias_regions.vm_memory_definition().base();
-                base.can_move();
-                if base_readonly {
-                    base.readonly();
-                }
-                let base = base.to_deferred_load(func);
+                let base = self
+                    .alias_regions
+                    .vm_memory_definition()
+                    .base()
+                    .can_move()
+                    .readonly_if(base_readonly)
+                    .to_deferred_load(func);
                 let len = self
                     .alias_regions
                     .vm_memory_definition()
@@ -1583,12 +1644,14 @@ impl FuncEnvironment<'_> {
                 // field's offset.
                 let owned_index = self.module.owned_memory_index(def_index);
                 let vmctx_off = self.offsets.owned_memories().at(owned_index);
-                let mut base = self.alias_regions.vm_memory_definition().base();
-                base.can_move();
-                if base_readonly {
-                    base.readonly();
-                }
-                let base = base.relative_to(vmctx_off).to_deferred_load(func);
+                let base = self
+                    .alias_regions
+                    .vm_memory_definition()
+                    .base()
+                    .can_move()
+                    .readonly_if(base_readonly)
+                    .relative_to(vmctx_off)
+                    .to_deferred_load(func);
                 let len = self
                     .alias_regions
                     .vm_memory_definition()
@@ -1608,12 +1671,13 @@ impl FuncEnvironment<'_> {
                 .from()
                 .relative_to(import_off)
                 .to_deferred_load(func);
-            let mut base = self.alias_regions.vm_memory_definition().base();
-            base.can_move();
-            if base_readonly {
-                base.readonly();
-            }
-            let base = base.to_deferred_load(func);
+            let base = self
+                .alias_regions
+                .vm_memory_definition()
+                .base()
+                .can_move()
+                .readonly_if(base_readonly)
+                .to_deferred_load(func);
             let len = self
                 .alias_regions
                 .vm_memory_definition()
@@ -1661,24 +1725,26 @@ impl FuncEnvironment<'_> {
             // A defined table's `VMTableDefinition` is inlined into the vmctx,
             // reached at an absolute `vmctx` offset.
             let vmctx_off = self.offsets.tables().at(def_index);
-            let mut base = self.alias_regions.vm_table_definition().base();
-            if is_static {
-                base.readonly().can_move();
-            }
             let base = VmctxLoadChain::new(smallvec![
-                base.relative_to(vmctx_off).to_deferred_load(func)
+                self.alias_regions
+                    .vm_table_definition()
+                    .base()
+                    .readonly_if(is_static)
+                    .can_move_if(is_static)
+                    .relative_to(vmctx_off)
+                    .to_deferred_load(func)
             ]);
             let bound = if is_static {
                 TableSize::Static {
                     bound: table.limits.min,
                 }
             } else {
-                let mut current_elements =
-                    self.alias_regions.vm_table_definition().current_elements();
-                current_elements.cast(bound_ty);
                 TableSize::Dynamic {
                     bound: VmctxLoadChain::new(smallvec![
-                        current_elements
+                        self.alias_regions
+                            .vm_table_definition()
+                            .current_elements()
+                            .cast(bound_ty)
                             .relative_to(vmctx_off)
                             .to_deferred_load(func)
                     ]),
@@ -1695,11 +1761,15 @@ impl FuncEnvironment<'_> {
                 .from()
                 .relative_to(import_off)
                 .to_deferred_load(func);
-            let mut base = self.alias_regions.vm_table_definition().base();
-            if is_static {
-                base.readonly().can_move();
-            }
-            let base = VmctxLoadChain::new(smallvec![from, base.to_deferred_load(func)]);
+            let base = VmctxLoadChain::new(smallvec![
+                from,
+                self.alias_regions
+                    .vm_table_definition()
+                    .base()
+                    .readonly_if(is_static)
+                    .can_move_if(is_static)
+                    .to_deferred_load(func),
+            ]);
             let bound = if is_static {
                 TableSize::Static {
                     bound: table.limits.min,
@@ -2007,100 +2077,23 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         abi == wasmtime_environ::Abi::Wasm && !self.tail && !self.env.tunables.debug_guest
     }
 
-    /// Inline lowering of a FACT adapter's `enter-sync-call` intrinsic: push a
-    /// `VMDeferredThread` onto an explicit stack slot and publish it as the
-    /// store's current thread, deferring the heavyweight task bookkeeping the
-    /// `enter_sync_call` libcall would otherwise do eagerly.
+    /// Inline lowering of a FACT adapter's `enter-sync-call` intrinsic, which
+    /// defers the heavyweight task bookkeeping the `enter_sync_call` libcall
+    /// would otherwise do eagerly.
     ///
     /// `real_call_args` is `[callee_vmctx, caller_vmctx, caller_instance,
     /// callee_async, callee_instance]`.
     fn lower_fact_enter_sync_call(&mut self, real_call_args: &[ir::Value]) -> CallRets {
-        let ptr_ty = self.env.pointer_type();
-        let ptr = self.env.offsets.ptr;
-
-        // Allocate the on-stack `VMDeferredThread`.
-        let size = u32::from(ptr.vm_deferred_thread().size());
-        let align_shift = u8::try_from(ptr.size().trailing_zeros()).unwrap();
-        let slot = self
-            .builder
-            .func
-            .create_sized_stack_slot(ir::StackSlotData::new(
-                ir::StackSlotKind::ExplicitSlot,
-                size,
-                align_shift,
-            ));
-        let slot_addr = self.builder.ins().stack_addr(ptr_ty, slot, 0);
-
-        let vmstore = self.env.get_vmstore_context_ptr(self.builder);
-
-        // Link the previous current thread in as this frame's parent.
-        let parent = self
-            .env
-            .alias_regions
-            .vmstore_context_current_thread(&mut self.builder.cursor(), vmstore);
-        self.env.alias_regions.store_vmdeferred_thread_parent(
-            &mut self.builder.cursor(),
-            slot_addr,
-            parent,
-        );
-
-        // Record the deferred `enter_sync_call` arguments.
-        self.env
-            .alias_regions
-            .store_vmdeferred_thread_caller_instance(
-                &mut self.builder.cursor(),
-                slot_addr,
-                real_call_args[2],
-            );
-        self.env.alias_regions.store_vmdeferred_thread_callee_async(
-            &mut self.builder.cursor(),
-            slot_addr,
-            real_call_args[3],
-        );
-        self.env
-            .alias_regions
-            .store_vmdeferred_thread_callee_instance(
-                &mut self.builder.cursor(),
-                slot_addr,
-                real_call_args[4],
-            );
-
-        // Save the caller's context slots into the frame and reset the live
-        // values to 0 for the freshly-entered (deferred) thread.
-        for i in 0..u8::try_from(NUM_COMPONENT_CONTEXT_SLOTS).unwrap() {
-            let saved = self
-                .env
-                .alias_regions
-                .vmstore_context_component_context_slot(
-                    &mut self.builder.cursor(),
-                    ir::types::I32,
-                    vmstore,
-                    i,
-                );
-            self.env
-                .alias_regions
-                .store_vmdeferred_thread_saved_context(
-                    &mut self.builder.cursor(),
-                    slot_addr,
-                    i,
-                    saved,
-                );
-            let zero = self.builder.ins().iconst(ir::types::I32, 0);
-            self.env
-                .alias_regions
-                .store_vmstore_context_component_context_slot(
-                    &mut self.builder.cursor(),
-                    vmstore,
-                    i,
-                    zero,
-                );
-        }
-
-        // Publish the deferred thread as the store's current thread.
-        self.env.alias_regions.store_vmstore_context_current_thread(
-            &mut self.builder.cursor(),
-            vmstore,
-            slot_addr,
+        let vmctx = self.env.vmctx_val(&mut self.builder.cursor());
+        let slot = crate::component_sync_call::enter(
+            self.builder,
+            &mut self.env.alias_regions,
+            vmctx,
+            crate::component_sync_call::EnterArgs {
+                caller_instance: real_call_args[2],
+                callee_async: real_call_args[3],
+                callee_instance: real_call_args[4],
+            },
         );
 
         debug_assert!(self.env.fact_sync_call_slot.is_none());
@@ -2109,72 +2102,26 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
     }
 
     /// Inline lowering of a FACT adapter's `exit-sync-call` intrinsic, the
-    /// counterpart to `lower_fact_enter_sync_call`. If our deferred thread is
-    /// still current (nothing forced it) we pop it and restore the caller's
-    /// context inline; otherwise we fall back to the out-of-line
-    /// `exit_sync_call` libcall.
+    /// counterpart to `lower_fact_enter_sync_call`.
     fn lower_fact_exit_sync_call(
         &mut self,
         callee_index: FuncIndex,
         sig_ref: ir::SigRef,
         real_call_args: &[ir::Value],
     ) -> CallRets {
-        let ptr_ty = self.env.pointer_type();
-
         let slot = self
             .env
             .fact_sync_call_slot
             .take()
             .expect("inline exit-sync-call without a matching enter-sync-call");
-        let slot_addr = self.builder.ins().stack_addr(ptr_ty, slot, 0);
-        let vmstore = self.env.get_vmstore_context_ptr(self.builder);
-        let cur = self
-            .env
-            .alias_regions
-            .vmstore_context_current_thread(&mut self.builder.cursor(), vmstore);
-        let is_fast = self.builder.ins().icmp(IntCC::Equal, cur, slot_addr);
-
-        let fast_block = self.builder.create_block();
-        let slow_block = self.builder.create_block();
-        let cont_block = self.builder.create_block();
-        self.builder
-            .ins()
-            .brif(is_fast, fast_block, &[], slow_block, &[]);
-        self.builder.seal_block(fast_block);
-        self.builder.seal_block(slow_block);
-
-        // Fast path: pop the deferred thread and restore the caller's context.
-        self.builder.switch_to_block(fast_block);
-        let parent = self
-            .env
-            .alias_regions
-            .vmdeferred_thread_parent(&mut self.builder.cursor(), slot_addr);
-        self.env.alias_regions.store_vmstore_context_current_thread(
-            &mut self.builder.cursor(),
-            vmstore,
-            parent,
-        );
-        for i in 0..u8::try_from(NUM_COMPONENT_CONTEXT_SLOTS).unwrap() {
-            let saved = self.env.alias_regions.vmdeferred_thread_saved_context(
-                &mut self.builder.cursor(),
-                slot_addr,
-                i,
-            );
-            self.env
-                .alias_regions
-                .store_vmstore_context_component_context_slot(
-                    &mut self.builder.cursor(),
-                    vmstore,
-                    i,
-                    saved,
-                );
-        }
-        self.builder.ins().jump(cont_block, &[]);
-
-        // Slow path: the thread was promoted to a real one, so do the
-        // equivalent out-of-line teardown via the `exit_sync_call` libcall.
-        self.builder.switch_to_block(slow_block);
         let vmctx = self.env.vmctx_val(&mut self.builder.cursor());
+        let slow = crate::component_sync_call::exit(
+            self.builder,
+            &mut self.env.alias_regions,
+            vmctx,
+            slot,
+        );
+
         let import_off = self.env.offsets.imported_functions().at(callee_index);
         let func_addr = self
             .env
@@ -2184,10 +2131,8 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
             .relative_to(import_off)
             .load(&mut self.builder.cursor(), vmctx);
         self.indirect_call_inst(sig_ref, func_addr, real_call_args);
-        self.builder.ins().jump(cont_block, &[]);
 
-        self.builder.seal_block(cont_block);
-        self.builder.switch_to_block(cont_block);
+        slow.finish(self.builder);
         CallRets::new()
     }
 
@@ -2335,18 +2280,20 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         //
         // Note that the callee may be null in which case this load may
         // trap. If so use the `TRAP_INDIRECT_CALL_TO_NULL` trap code.
-        let mut mem_flags = ir::MemFlagsData::trusted().with_readonly();
-        if self.env.clif_memory_traps_enabled() {
-            mem_flags = mem_flags.with_trap_code(Some(crate::TRAP_INDIRECT_CALL_TO_NULL));
+        let trap_code = if self.env.clif_memory_traps_enabled() {
+            Some(crate::TRAP_INDIRECT_CALL_TO_NULL)
         } else {
             self.env
                 .trapz(self.builder, funcref_ptr, crate::TRAP_INDIRECT_CALL_TO_NULL);
-        }
-        let callee_sig_id = self.env.alias_regions.vmfuncref_type_index(
-            &mut self.builder.cursor(),
-            mem_flags,
-            funcref_ptr,
-        );
+            None
+        };
+        let callee_sig_id = self
+            .env
+            .alias_regions
+            .vm_func_ref()
+            .type_index()
+            .trap_code(trap_code)
+            .load(&mut self.builder.cursor(), funcref_ptr);
 
         // Check that they match: in the case of Wasm GC, this means doing a
         // full subtype check. Otherwise, we do a simple equality check.
@@ -2404,24 +2351,27 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         // optional trap code provided by the caller of `unchecked_call` which
         // will handle the case where this is either already known to be
         // non-null or may trap.
-        let mem_flags = ir::MemFlagsData::trusted().with_readonly();
-        let mut callee_flags = mem_flags;
-        if self.env.clif_memory_traps_enabled() {
-            callee_flags = callee_flags.with_trap_code(callee_load_trap_code);
+        let callee_load_trap_code = if self.env.clif_memory_traps_enabled() {
+            callee_load_trap_code
         } else {
             if let Some(trap) = callee_load_trap_code {
                 self.env.trapz(self.builder, callee, trap);
             }
-        }
-        let func_addr = self.env.alias_regions.vmfuncref_wasm_call(
-            &mut self.builder.cursor(),
-            callee_flags,
-            callee,
-        );
-        let callee_vmctx =
-            self.env
-                .alias_regions
-                .vmfuncref_vmctx(&mut self.builder.cursor(), mem_flags, callee);
+            None
+        };
+        let func_addr = self
+            .env
+            .alias_regions
+            .vm_func_ref()
+            .wasm_call()
+            .trap_code(callee_load_trap_code)
+            .load(&mut self.builder.cursor(), callee);
+        let callee_vmctx = self
+            .env
+            .alias_regions
+            .vm_func_ref()
+            .vmctx()
+            .load(&mut self.builder.cursor(), callee);
 
         (func_addr, callee_vmctx)
     }

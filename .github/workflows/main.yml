@@ -417,6 +417,10 @@ jobs:
               -p cranelift-entity --no-default-features
               -p cranelift-entity --no-default-features --features enable-serde
 
+          - name: cranelift-module
+            checks: |
+              -p cranelift-module --no-default-features
+
           - name: wasmtime-bench-api
             checks: |
               -p wasmtime-bench-api
@@ -427,6 +431,7 @@ jobs:
               -p wasmtime-c-api --no-default-features --features wat
               -p wasmtime-c-api --no-default-features --features wasi
               -p wasmtime-c-api --no-default-features --features gc
+              -p wasmtime-c-api --no-default-features --features component-model
 
           - name: wasmtime-wasi-http
             checks: |
@@ -1462,7 +1467,7 @@ jobs:
       - test_capi
       - test_debug_dwarf
       - test_fuzzing
-      # - test_wasi_nn
+      - test_wasi_nn
       - test_nightly
       - build
       - rustfmt

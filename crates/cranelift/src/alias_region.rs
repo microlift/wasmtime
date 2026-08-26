@@ -75,8 +75,8 @@ enum AliasRegionKey {
         offset: u32,
     },
 
-    /// An imported or exported memory access (shared across all
-    /// imported/exported memories).
+    /// An access of a memory that crosses a module boundary and whose
+    /// definition we do not statically know (shared across all such memories).
     PublicMemory,
 
     /// A defined memory access.
@@ -87,8 +87,8 @@ enum AliasRegionKey {
         index: DefinedMemoryIndex,
     },
 
-    /// An imported or exported table access (shared across all
-    /// imported/exported tables).
+    /// An access of a table that crosses a module boundary and whose definition
+    /// we do not statically know (shared across all such tables).
     PublicTable,
 
     /// A defined table access.
@@ -99,8 +99,8 @@ enum AliasRegionKey {
         index: DefinedTableIndex,
     },
 
-    /// An imported or exported global access (shared across all
-    /// imported/exported globals).
+    /// An access of a global that crosses a module boundary and whose definition
+    /// we do not statically know (shared across all such globals).
     PublicGlobal,
 
     /// A defined global access.
@@ -318,6 +318,11 @@ pub struct AliasRegions<Offsets> {
 }
 
 impl<Offsets> AliasRegions<Offsets> {
+    /// Get the offsets this `AliasRegions` computes its field offsets from.
+    pub fn offsets(&self) -> &Offsets {
+        &self.offsets
+    }
+
     /// Make the alias region for a stack map.
     pub fn stack_map_region(
         regions: &mut ir::AliasRegionSet,
@@ -416,16 +421,43 @@ impl<'a, Offsets> Field<'a, Offsets> {
     /// module being compiled (e.g. whether a memory can be relocated) rather
     /// than being a static property of the field; this method allows callers
     /// to mark the load as `readonly` in these cases.
-    pub fn readonly(&mut self) -> &mut Self {
+    pub fn readonly(mut self) -> Self {
         self.flags.set_readonly();
         self
+    }
+
+    /// Mark accesses of this field as `readonly` if and only if `readonly` is
+    /// `true`.
+    ///
+    /// See the note on [`Field::readonly`].
+    pub fn readonly_if(self, readonly: bool) -> Self {
+        if readonly { self.readonly() } else { self }
     }
 
     /// Mark accesses of this field as `can_move`.
     ///
     /// See the note on [`Field::readonly`].
-    pub fn can_move(&mut self) -> &mut Self {
+    pub fn can_move(mut self) -> Self {
         self.flags = self.flags.with_can_move();
+        self
+    }
+
+    /// Mark accesses of this field as `can_move` if and only if `can_move` is
+    /// `true`.
+    ///
+    /// See the note on [`Field::readonly`].
+    pub fn can_move_if(self, can_move: bool) -> Self {
+        if can_move { self.can_move() } else { self }
+    }
+
+    /// Set the trap code for accesses of this field.
+    ///
+    /// A `Field`'s accesses do not trap by default.
+    ///
+    /// Note that when signals-based traps are disabled, callers must use the
+    /// explicit call-to-host trapping codegen instead.
+    pub fn trap_code(mut self, code: Option<ir::TrapCode>) -> Self {
+        self.flags = self.flags.with_trap_code(code);
         self
     }
 
@@ -435,7 +467,7 @@ impl<'a, Offsets> Field<'a, Offsets> {
     /// `VMGlobalDefinition`'s storage (a `[u8; 16]` represented as
     /// `ir::types::I8X16`) to the global's actual Wasm type's representation
     /// (`ir::types::I32` for a Wasm `i32`).
-    pub fn cast(&mut self, ty: ir::Type) -> &mut Self {
+    pub fn cast(mut self, ty: ir::Type) -> Self {
         self.ty = ty;
         self
     }
@@ -456,10 +488,15 @@ impl<'a, Offsets> Field<'a, Offsets> {
         self
     }
 
+    /// Get-or-create this field's alias region.
+    pub fn region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
+        self.regions.region(func, self.key)
+    }
+
     /// Get-or-create this field's alias region and mix it into this field's
     /// base flags.
     fn flags_with_region(&mut self, func: &mut ir::Function) -> ir::MemFlagsData {
-        let region = self.regions.region(func, self.key);
+        let region = self.region(func);
         self.flags.with_alias_region(Some(region))
     }
 
@@ -710,7 +747,10 @@ wasmtime_environ::for_each_vm_type!(define_vm_type_alias_region_helpers);
 /// pointer size, so their accessors are available for any `Offsets: GetPtrSize`.
 /// Its `dynamic` fields sit at offsets that additionally depend on the module or
 /// component being compiled, so their accessors are only available when the
-/// `AliasRegions` carries that vmctx's own fully-computed offsets.
+/// `AliasRegions` carries that vmctx's own fully-computed offsets. The exception
+/// is a `dynamic` field marked `#[ptr_size_offset]`, whose offsets are derived
+/// only from the pointer size; these live in the `Offsets: GetPtrSize` block as
+/// well.
 ///
 /// A field marked `#[aggregate]` gets no accessor, for the same reason it gets
 /// none in [`define_vm_type_alias_region_helpers!`]: it has no single Cranelift
@@ -748,6 +788,7 @@ macro_rules! define_vmctx_alias_region_helpers {
     (@apply_attr $flags:expr, [readonly]) => { $flags.with_readonly() };
     (@apply_attr $flags:expr, [can_move]) => { $flags.with_can_move() };
     (@apply_attr $flags:expr, [access_as = $($t:tt)*]) => { $flags };
+    (@apply_attr $flags:expr, [ptr_size_offset]) => { $flags };
 
     // Compute a field's access flags and Cranelift type from its declared type
     // and marker attributes, and build the `Field` for it at `$offset`.
@@ -784,7 +825,52 @@ macro_rules! define_vmctx_alias_region_helpers {
         }
     };
 
+    // ### `dynamic` Section Entries Marked `#[ptr_size_offset]`
+    //
+    // These get their offsets from the pointer-size-only `offsets::VMFoo<P>`
+    // wrapper, and don't require a full `VMOffsets` parameterization.
+
+    (@ptr_size_entry $Name:ident $snake:ident field {
+        #[ptr_size_offset] $(# $fattr:tt)* $fname:ident : $($fty:tt)*
+    }) => {
+        #[doc = concat!(
+            "Get the [`Field`] for the `", stringify!($fname), "` field of `",
+            stringify!($Name), "`."
+        )]
+        pub fn $fname(self) -> Field<'a, Offsets> {
+            let offset = self.regions.offsets.get_ptr_size().$snake().$fname();
+            define_vmctx_alias_region_helpers!(
+                @field $Name (self, offset) [ $($fty)* ] [ $(# $fattr)* ]
+            )
+        }
+    };
+
+    (@ptr_size_entry $Name:ident $snake:ident array {
+        #[ptr_size_offset] $(# $fattr:tt)* $fname:ident [ $count:ident ; $Index:ident ] : $($fty:tt)*
+    }) => {
+        #[doc = concat!(
+            "Get the [`Field`] for the `index`th element of `", stringify!($Name),
+            "`'s `", stringify!($fname), "` array.\n\nThis is not bounds checked: \
+             the array's length depends on the module or component being compiled, \
+             which is precisely what this accessor does not require knowing."
+        )]
+        pub fn $fname(self, index: $Index) -> Field<'a, Offsets> {
+            let offset = self.regions.offsets.get_ptr_size().$snake().$fname(index);
+            define_vmctx_alias_region_helpers!(
+                @field $Name (self, offset) [ $($fty)* ] [ $(# $fattr)* ]
+            )
+        }
+    };
+
+    (@ptr_size_entry $Name:ident $snake:ident $kind:ident $entry:tt) => {};
+
     // ### `dynamic` Section Entries
+
+    // Entries marked `#[ptr_size_offset]` were already handled above; emitting
+    // them here too would be a duplicate definition.
+    (@dynamic_entry $Name:ident $Offsets:tt $kind:ident {
+        #[ptr_size_offset] $($rest:tt)*
+    }) => {};
 
     (@dynamic_entry $Name:ident $Offsets:tt align { $al:tt }) => {};
 
@@ -848,7 +934,7 @@ macro_rules! define_vmctx_alias_region_helpers {
     // Emit the accessor `struct` and both `impl` blocks for one vmctx type.
     (@emit $Name:ident $snake:ident $Offsets:tt
         static { $($skind:ident $sentry:tt)* }
-        dynamic { $($dyn:tt)* }
+        dynamic { $($dkind:ident $dentry:tt)* }
     ) => {
         #[doc = concat!(
             "An [`AliasRegions`] accessor for the fields of a `", stringify!($Name),
@@ -879,13 +965,14 @@ macro_rules! define_vmctx_alias_region_helpers {
             Offsets: GetPtrSize,
         {
             $( define_vmctx_alias_region_helpers!(@static_entry $Name $snake $skind $sentry); )*
+            $( define_vmctx_alias_region_helpers!(@ptr_size_entry $Name $snake $dkind $dentry); )*
         }
 
         // A dynamically-positioned field's offset depends on the module or
         // component being compiled, so these accessors require this vmctx's own
         // fully-computed offsets.
         define_vmctx_alias_region_helpers!(
-            @dynamic_impl $Name $Offsets $Offsets { $($dyn)* }
+            @dynamic_impl $Name $Offsets $Offsets { $($dkind $dentry)* }
         );
     };
 
@@ -932,19 +1019,29 @@ where
         }
     }
 
+    /// The Cranelift type of a pointer on the target being compiled for.
+    pub fn pointer_type(&self) -> ir::Type {
+        self.pointer_type
+    }
+
+    /// The pointer size of the target being compiled for, used to compute the
+    /// layout of Wasmtime's vmctx types.
+    pub fn ptr_size(&self) -> &Offsets::Ptr {
+        self.offsets.get_ptr_size()
+    }
+
     /// Get the alias region for accesses into the GC heap.
     pub fn gc_heap_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
         self.region(func, AliasRegionKey::GcHeap)
     }
 
-    /// Get the alias region for an imported or exported memory access (shared
-    /// across all imported/exported memories).
+    /// Get the alias region shared by all memories that cross a module boundary
+    /// and whose definition we do not statically know.
     pub fn public_memory_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
         self.region(func, AliasRegionKey::PublicMemory)
     }
 
-    /// Get the alias region for accessing a defined memory that is not
-    /// exported.
+    /// Get the alias region for accessing a particular defined memory.
     pub fn defined_memory_region(
         &mut self,
         func: &mut ir::Function,
@@ -954,14 +1051,13 @@ where
         self.region(func, AliasRegionKey::DefinedMemory { module, index })
     }
 
-    /// Get the alias region for an imported or exported table access (shared
-    /// across all imported/exported memories).
+    /// Get the alias region shared by all tables that cross a module boundary
+    /// and whose definition we do not statically know.
     pub fn public_table_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
         self.region(func, AliasRegionKey::PublicTable)
     }
 
-    /// Get the alias region for accessing a defined table that is not
-    /// exported.
+    /// Get the alias region for accessing a particular defined table.
     pub fn defined_table_region(
         &mut self,
         func: &mut ir::Function,
@@ -971,14 +1067,13 @@ where
         self.region(func, AliasRegionKey::DefinedTable { module, index })
     }
 
-    /// Get the alias region for an imported or exported global access (shared
-    /// across all imported/exported memories).
+    /// Get the alias region shared by all globals that cross a module boundary
+    /// and whose definition we do not statically know.
     pub fn public_global_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
         self.region(func, AliasRegionKey::PublicGlobal)
     }
 
-    /// Get the alias region for accessing a defined global that is not
-    /// exported.
+    /// Get the alias region for accessing a particular defined global.
     pub fn defined_global_region(
         &mut self,
         func: &mut ir::Function,
@@ -1036,208 +1131,6 @@ where
             vmstore_ctx,
             i32::try_from(offset).unwrap(),
         );
-    }
-
-    /// Load a pointer to the `*mut T` store data from a `*mut VMStoreContext`.
-    pub fn vmstore_context_store_data(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            self.pointer_type,
-            ir::MemFlagsData::trusted().with_readonly().with_can_move(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .store_data()
-                .into(),
-        )
-    }
-
-    /// Load the `VMStoreContext::execution_version` field.
-    pub fn vmstore_context_execution_version(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            ir::types::I64,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .execution_version()
-                .into(),
-        )
-    }
-
-    /// Store the `VMStoreContext::execution_version` field.
-    pub fn store_vmstore_context_execution_version(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        new_version: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .execution_version()
-                .into(),
-            new_version,
-        )
-    }
-
-    /// Load the `VMStoreContext::fuel_consumed` field.
-    pub fn vmstore_context_fuel_consumed(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            ir::types::I64,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .fuel_consumed()
-                .into(),
-        )
-    }
-
-    /// Store the `VMStoreContext::fuel_consumed` field.
-    pub fn store_vmstore_context_fuel_consumed(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        fuel_consumed: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .fuel_consumed()
-                .into(),
-            fuel_consumed,
-        )
-    }
-
-    /// Load the `VMStoreContext::epoch_deadline` field.
-    pub fn vmstore_context_epoch_deadline(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            ir::types::I64,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .epoch_deadline()
-                .into(),
-        )
-    }
-
-    /// Get a `Load` for the `VmStoreContext::stack_limits` field.
-    pub fn vmstore_context_stack_limit_load(&mut self, func: &mut ir::Function) -> Load {
-        let offset = self
-            .offsets
-            .get_ptr_size()
-            .vm_store_context()
-            .stack_limit()
-            .into();
-        let region = self.vmstore_context_region(func, offset);
-        Load {
-            offset,
-            flags: ir::MemFlagsData::trusted().with_alias_region(Some(region)),
-            ty: self.pointer_type,
-        }
-    }
-
-    /// Load the `VMStoreContext::stack_limit` field.
-    pub fn vmstore_context_stack_limit(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_stack_limit_load(cursor.func)
-            .emit(cursor, vmstore_ctx)
-    }
-
-    /// Store the `VMStoreContext::stack_limit` field.
-    pub fn store_vmstore_context_stack_limit(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        stack_limit: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .stack_limit()
-                .into(),
-            stack_limit,
-        )
-    }
-
-    /// Load the `VMStoreContext::current_thread` field (the JIT-visible
-    /// deferred-thread pointer; see `VMLazyThread`).
-    pub fn vmstore_context_current_thread(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            self.pointer_type,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .current_thread()
-                .into(),
-        )
-    }
-
-    /// Store the `VMStoreContext::current_thread` field.
-    pub fn store_vmstore_context_current_thread(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        new_thread: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .current_thread()
-                .into(),
-            new_thread,
-        )
     }
 
     /// Get a `Load` of the GC heap base pointer (`VMStoreContext::gc_heap.base`).
@@ -1301,163 +1194,6 @@ where
     ) -> ir::Value {
         self.vmstore_context_gc_heap_current_length_load(cursor.func)
             .emit(cursor, vmstore_ctx)
-    }
-
-    /// Load the `VMStoreContext::last_wasm_entry_fp` field.
-    pub fn vmstore_context_last_wasm_entry_fp(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            self.pointer_type,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_entry_fp()
-                .into(),
-        )
-    }
-
-    /// Load the `VMStoreContext::last_wasm_entry_sp` field.
-    pub fn vmstore_context_last_wasm_entry_sp(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            self.pointer_type,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_entry_sp()
-                .into(),
-        )
-    }
-
-    /// Load the `VMStoreContext::last_wasm_entry_trap_handler` field.
-    pub fn vmstore_context_last_wasm_entry_trap_handler(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-    ) -> ir::Value {
-        self.vmstore_context_load(
-            cursor,
-            self.pointer_type,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_entry_trap_handler()
-                .into(),
-        )
-    }
-
-    /// Store the `VMStoreContext::last_wasm_entry_fp` field.
-    pub fn store_vmstore_context_last_wasm_entry_fp(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        fp: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_entry_fp()
-                .into(),
-            fp,
-        )
-    }
-
-    /// Store the `VMStoreContext::last_wasm_entry_sp` field.
-    pub fn store_vmstore_context_last_wasm_entry_sp(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        sp: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_entry_sp()
-                .into(),
-            sp,
-        )
-    }
-
-    /// Store the `VMStoreContext::last_wasm_entry_trap_handler` field.
-    pub fn store_vmstore_context_last_wasm_entry_trap_handler(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        trap_handler: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_entry_trap_handler()
-                .into(),
-            trap_handler,
-        )
-    }
-
-    /// Store the `VMStoreContext::last_wasm_exit_trampoline_fp` field.
-    pub fn store_vmstore_context_last_wasm_exit_trampoline_fp(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        fp: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_exit_trampoline_fp()
-                .into(),
-            fp,
-        )
-    }
-
-    /// Store the `VMStoreContext::last_wasm_exit_pc` field.
-    pub fn store_vmstore_context_last_wasm_exit_pc(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmstore_ctx: ir::Value,
-        pc: ir::Value,
-    ) {
-        self.vmstore_context_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmstore_ctx,
-            self.offsets
-                .get_ptr_size()
-                .vm_store_context()
-                .last_wasm_exit_pc()
-                .into(),
-            pc,
-        )
     }
 
     /// Get the alias region for the `VMStoreContext::stack_chain` field.
@@ -1575,105 +1311,6 @@ where
         );
     }
 
-    /// Load `VMDeferredThread::parent` (the current thread this frame replaced).
-    pub fn vmdeferred_thread_parent(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmdeferred_thread_ptr: ir::Value,
-    ) -> ir::Value {
-        self.vmdeferred_thread_load(
-            cursor,
-            self.pointer_type,
-            ir::MemFlagsData::trusted(),
-            vmdeferred_thread_ptr,
-            self.offsets
-                .get_ptr_size()
-                .vm_deferred_thread()
-                .parent()
-                .into(),
-        )
-    }
-
-    /// Store `VMDeferredThread::parent`.
-    pub fn store_vmdeferred_thread_parent(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmdeferred_thread_ptr: ir::Value,
-        parent: ir::Value,
-    ) {
-        self.vmdeferred_thread_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmdeferred_thread_ptr,
-            self.offsets
-                .get_ptr_size()
-                .vm_deferred_thread()
-                .parent()
-                .into(),
-            parent,
-        )
-    }
-
-    /// Store `VMDeferredThread::caller_instance`.
-    pub fn store_vmdeferred_thread_caller_instance(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmdeferred_thread_ptr: ir::Value,
-        caller_instance: ir::Value,
-    ) {
-        self.vmdeferred_thread_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmdeferred_thread_ptr,
-            self.offsets
-                .get_ptr_size()
-                .vm_deferred_thread()
-                .caller_instance()
-                .into(),
-            caller_instance,
-        )
-    }
-
-    /// Store `VMDeferredThread::callee_async`.
-    pub fn store_vmdeferred_thread_callee_async(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmdeferred_thread_ptr: ir::Value,
-        callee_async: ir::Value,
-    ) {
-        self.vmdeferred_thread_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmdeferred_thread_ptr,
-            self.offsets
-                .get_ptr_size()
-                .vm_deferred_thread()
-                .callee_async()
-                .into(),
-            callee_async,
-        )
-    }
-
-    /// Store `VMDeferredThread::callee_instance`.
-    pub fn store_vmdeferred_thread_callee_instance(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        vmdeferred_thread_ptr: ir::Value,
-        callee_instance: ir::Value,
-    ) {
-        self.vmdeferred_thread_store(
-            cursor,
-            ir::MemFlagsData::trusted(),
-            vmdeferred_thread_ptr,
-            self.offsets
-                .get_ptr_size()
-                .vm_deferred_thread()
-                .callee_instance()
-                .into(),
-            callee_instance,
-        )
-    }
-
     /// Load `VMDeferredThread::saved_context[i]` (a saved `context.{get,set}`
     /// slot).
     pub fn vmdeferred_thread_saved_context(
@@ -1713,104 +1350,6 @@ where
                 .saved_context_slot(i)
                 .into(),
             val,
-        )
-    }
-}
-
-/// `VMFuncRef`-related methods.
-impl<Offsets> AliasRegions<Offsets>
-where
-    Offsets: GetPtrSize,
-{
-    fn vmfuncref_region(&mut self, func: &mut ir::Function, offset: u32) -> ir::AliasRegion {
-        self.region(
-            func,
-            AliasRegionKey::Vm {
-                ty: VmType::VMFuncRef,
-                offset,
-            },
-        )
-    }
-
-    /// Load the `VMFuncRef::type_index` field out of a `*const VMFuncRef`.
-    pub fn vmfuncref_type_index(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        base_flags: ir::MemFlagsData,
-        funcref: ir::Value,
-    ) -> ir::Value {
-        let offset = self.offsets.get_ptr_size().vm_func_ref().type_index();
-        let region = self.vmfuncref_region(cursor.func, offset.into());
-        let ty = ir::Type::int_with_byte_size(
-            self.offsets
-                .get_ptr_size()
-                .size_of_vmshared_type_index()
-                .into(),
-        )
-        .unwrap();
-        cursor.ins().load(
-            ty,
-            base_flags.with_alias_region(Some(region)),
-            funcref,
-            i32::from(offset),
-        )
-    }
-
-    /// Load the `VMFuncRef::wasm_call` field out of a `*const VMFuncRef`.
-    ///
-    /// The caller supplies the base flags because this load may carry an
-    /// optional trap code for the null-funcref case.
-    pub fn vmfuncref_wasm_call(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        base_flags: ir::MemFlagsData,
-        funcref: ir::Value,
-    ) -> ir::Value {
-        let offset = self.offsets.get_ptr_size().vm_func_ref().wasm_call();
-        let region = self.vmfuncref_region(cursor.func, offset.into());
-        cursor.ins().load(
-            self.pointer_type,
-            base_flags.with_alias_region(Some(region)),
-            funcref,
-            i32::from(offset),
-        )
-    }
-
-    /// Load the `VMFuncRef::vmctx` field out of a `*const VMFuncRef`.
-    pub fn vmfuncref_vmctx(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        base_flags: ir::MemFlagsData,
-        funcref: ir::Value,
-    ) -> ir::Value {
-        let offset = self.offsets.get_ptr_size().vm_func_ref().vmctx();
-        let region = self.vmfuncref_region(cursor.func, offset.into());
-        cursor.ins().load(
-            self.pointer_type,
-            base_flags.with_alias_region(Some(region)),
-            funcref,
-            i32::from(offset),
-        )
-    }
-
-    /// Load the `array_call` field of the `VMFuncRef` inlined in a
-    /// `VMArrayCallHostFuncContext`.
-    pub fn vmarray_call_host_func_context_array_call(
-        &mut self,
-        cursor: &mut FuncCursor<'_>,
-        host_func_ctx: ir::Value,
-    ) -> ir::Value {
-        let func_ref = self
-            .offsets
-            .get_ptr_size()
-            .vmarray_call_host_func_context_func_ref();
-        let field = self.offsets.get_ptr_size().vm_func_ref().array_call();
-        let region = self.vmfuncref_region(cursor.func, field.into());
-        cursor.ins().load(
-            self.pointer_type,
-            ir::MemFlagsData::trusted().with_alias_region(Some(region)),
-            host_func_ctx,
-            i32::from(func_ref) + i32::from(field),
         )
     }
 }
