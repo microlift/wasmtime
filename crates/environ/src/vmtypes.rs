@@ -20,6 +20,14 @@
 ///
 /// * Doc-comment attributes (`#[doc = "..."]`).
 ///
+/// * An optional `#[cfg(...)]` attribute, gating the type on the Cargo features
+///   whose code actually uses it.
+///
+///   Only the runtime's `struct` definition (and its layout test) is gated by
+///   it. A type's offsets and alias regions are always generated because the
+///   `wasmtime-environ` and `wasmtime-internal-cranelift` crates do not have
+///   Cargo features for all the various Wasm features.
+///
 /// * An optional `#[derive(...)]` attribute.
 ///
 /// * A `#[repr(...)]` attribute.
@@ -36,6 +44,13 @@
 ///   whole and no alias-region accessor is generated for it. The field's offset
 ///   is still generated, since that is what interior accesses are computed
 ///   relative to.
+///
+/// * `#[indexed]`: this field is a fixed-size array of a scalar type, whose
+///   elements compiled Wasm code accesses individually by a compile-time
+///   constant index. Like `#[aggregate]`, the field has no single Cranelift
+///   type; unlike `#[aggregate]`, its elements all do, so an alias-region
+///   accessor taking that index is generated for it and each element gets its
+///   own alias region.
 ///
 /// * `#[readonly]` and/or `#[can_move]`: describe how Cranelift may treat loads
 ///   and stores of that field.
@@ -456,7 +471,7 @@ macro_rules! for_each_vm_type {
                 /// This is saved/restored when threads are swapped in the component model.
                 ///
                 /// NB: `UnsafeCell` because JIT code writes to the slots.
-                #[aggregate]
+                #[indexed]
                 pub component_context: UnsafeCell<[u32; NUM_COMPONENT_CONTEXT_SLOTS]>,
 
                 /// JIT-visible current thread for the component model's sync-to-sync
@@ -542,8 +557,175 @@ macro_rules! for_each_vm_type {
                 pub callee_instance: u32,
                 /// The caller thread's `context.{get,set}` slots, saved on entry and
                 /// restored on the fast-path exit (or recovered while forcing).
-                #[aggregate]
+                #[indexed]
                 pub saved_context: [u32; NUM_COMPONENT_CONTEXT_SLOTS],
+            }
+
+            /// This type is used to save (and subsequently restore) a subset of
+            /// the data in `VMStoreContext`.
+            ///
+            /// See documentation of `VMStackChain` for the exact uses.
+            #[derive(Debug, Default, Clone)]
+            #[repr(C)]
+            #[snake_name = vm_stack_limits]
+            pub struct VMStackLimits {
+                /// Saved version of the `stack_limit` field of `VMStoreContext`.
+                pub stack_limit: usize,
+                /// Saved version of the `last_wasm_entry_fp` field of
+                /// `VMStoreContext`.
+                pub last_wasm_entry_fp: usize,
+                /// Saved version of the `last_wasm_entry_sp` field of
+                /// `VMStoreContext`.
+                pub last_wasm_entry_sp: usize,
+                /// Saved version of the `last_wasm_entry_trap_handler` field of
+                /// `VMStoreContext`.
+                pub last_wasm_entry_trap_handler: usize,
+            }
+
+            /// A reference to a buffer ("array") allocated on a continuation's
+            /// stack.
+            ///
+            /// The elements are of whatever type the buffer's user expects;
+            /// `data` is an untyped pointer, and the runtime casts it at each
+            /// use site.
+            #[derive(Debug, Clone)]
+            #[repr(C)]
+            #[snake_name = vm_host_array]
+            pub struct VMHostArray {
+                /// Number of currently occupied slots.
+                pub length: u32,
+
+                /// Number of slots in the data buffer. Note that this is *not*
+                /// the size of the buffer in bytes!
+                pub capacity: u32,
+
+                /// The buffer itself, which lives on the continuation's stack
+                /// rather than in this object.
+                pub data: *mut u8,
+            }
+
+            /// The information saved for every stack, whether it is a
+            /// continuation's or the initial stack's.
+            #[derive(Debug, Clone)]
+            #[repr(C)]
+            #[snake_name = vm_common_stack_information]
+            pub struct VMCommonStackInformation {
+                /// The subset of `VMStoreContext` saved for this stack.
+                #[aggregate]
+                pub limits: VMStackLimits,
+
+                /// Where this stack is in its life cycle; a `VMStackState`
+                /// discriminant.
+                pub state: VMStackState,
+
+                /// The tags this stack handles, set while it is a `Parent`.
+                #[aggregate]
+                pub handlers: VMHostArray,
+
+                /// The index within `handlers` of the first `switch` handler.
+                pub first_switch_handler_index: u32,
+            }
+
+            /// A continuation.
+            #[repr(C)]
+            #[snake_name = vm_cont_ref]
+            pub struct VMContRef {
+                /// The information saved for this continuation's stack.
+                #[aggregate]
+                pub common_stack_information: VMCommonStackInformation,
+
+                /// This continuation's parent: another continuation, the
+                /// initial stack, or absent.
+                #[aggregate]
+                pub parent_chain: VMStackChain,
+
+                /// The end of this continuation's parent chain, used only while
+                /// it is `Suspended` or `Fresh`.
+                pub last_ancestor: *mut VMContRef,
+
+                /// Revision counter.
+                pub revision: usize,
+
+                /// The stack this continuation runs on.
+                #[aggregate]
+                pub stack: VMContinuationStack,
+
+                /// The arguments to, and return values of, the function passed
+                /// to `cont.new`.
+                #[aggregate]
+                pub args: VMHostArray,
+
+                /// The payloads passed to and from this continuation once it
+                /// has been suspended.
+                #[aggregate]
+                pub values: VMHostArray,
+
+                /// Tells the compiler that this structure has potential
+                /// self-references, through `last_ancestor`.
+                ///
+                /// This is a zero-sized type in final position, so it affects
+                /// neither this type's size nor its alignment.
+                #[aggregate]
+                pub _marker: PhantomPinned,
+            }
+
+            /// The deferred-reference-counting collector's JIT-accessible heap
+            /// data.
+            ///
+            /// This is a separate allocation, reached through the
+            /// `VMContext::gc_heap_data` pointer. Its fields are not GC heap
+            /// locations, so they get this type's own alias regions rather than
+            /// the GC heap's.
+            ///
+            /// `wasmtime::runtime::vm::gc::enabled::drc` owns one of these,
+            /// wrapped in a cell because compiled Wasm writes to it, and
+            /// accesses it only through that wrapper's methods.
+            #[cfg(feature = "gc-drc")]
+            #[derive(Default)]
+            #[repr(C)]
+            #[snake_name = vm_drc_heap_data]
+            pub struct VMDrcHeapData {
+                /// The head of the over-approximated-stack-roots list.
+                pub over_approximated_stack_roots: Option<VMGcRef>,
+
+                /// The current size of the over-approximated-stack-roots list.
+                pub current_over_approximated_stack_roots_len: u32,
+
+                /// The size of the over-approximated-stack-roots list
+                /// immediately after the last GC.
+                pub over_approximated_stack_roots_len_after_last_gc: u32,
+            }
+
+            /// The copying collector's JIT-accessible bump-allocation state.
+            ///
+            /// Like [`VMDrcHeapData`], this is a separate allocation reached
+            /// through `VMContext::gc_heap_data`, and is owned, wrapped in a
+            /// cell, by `wasmtime::runtime::vm::gc::enabled::copying`.
+            #[cfg(feature = "gc-copying")]
+            #[derive(Default)]
+            #[repr(C)]
+            #[snake_name = vm_copying_heap_data]
+            pub struct VMCopyingHeapData {
+                /// Current bump pointer (an index into the GC heap).
+                pub bump_ptr: u32,
+
+                /// End of the active semi-space.
+                pub active_space_end: u32,
+            }
+
+            /// The null collector's JIT-accessible bump-allocation state.
+            ///
+            /// Unlike the two above, this is not a separate allocation: it is
+            /// the first field of `NullHeap` (in
+            /// `wasmtime::runtime::vm::gc::enabled::null`), again wrapped in a
+            /// cell, and compiled Wasm reaches it through a pointer to that
+            /// field.
+            #[cfg(feature = "gc-null")]
+            #[repr(C)]
+            #[snake_name = vm_null_heap_data]
+            pub struct VMNullHeapData {
+                /// The bump-allocation finger, an index into the GC heap.
+                pub next: NonZeroU32,
             }
         }
     };

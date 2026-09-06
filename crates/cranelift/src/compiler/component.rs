@@ -1129,12 +1129,6 @@ impl<'a> TrampolineCompiler<'a> {
         //      may_leave = load.i32 vmctx+$instance_flags_offset
         //      trapz may_leave, $TRAP_CANNOT_LEAVE_COMPONENT
         //
-        //      ;; set may_block to false, saving the old value to restore
-        //      ;; later, but only if the component instances differ and
-        //      ;; concurrency is enabled
-        //      old_may_block = load.i32 vmctx+$may_block_offset
-        //      store 0, vmctx+$may_block_offset
-        //
         //      ;; enter a sync call, but only if the component instances
         //      ;; differ and concurrency is enabled. This pushes an on-stack
         //      ;; `VMDeferredThread` and zeroes the live context slots; see
@@ -1157,11 +1151,6 @@ impl<'a> TrampolineCompiler<'a> {
         //      store saved0, vmstore+$context_slot0
         //      ...
         //      ;; ============================================================
-        //
-        //      ;; if needed, exit the sync call entered above and restore the
-        //      ;; old value of may_block
-        //      ...
-        //      store old_may_block, vmctx+$may_block_offset
         //
         //      jump return_block
         //
@@ -1191,8 +1180,8 @@ impl<'a> TrampolineCompiler<'a> {
         self.builder.switch_to_block(run_destructor_block);
 
         // If this is a component-defined resource, the `may_leave` flag must be
-        // checked. Additionally, if concurrency is enabled, the `may_block`
-        // field must be updated and a sync call entered.
+        // checked. Additionally, if concurrency is enabled, the sync call will
+        // be entered.
         let entered_sync_call = if has_destructor && let Some(def) = resource_def {
             // Skip the may-leave check for self-owned resources.
             if self.types[resource].unwrap_concrete_instance() != def.instance {
@@ -1200,23 +1189,7 @@ impl<'a> TrampolineCompiler<'a> {
             }
 
             if self.compiler.tunables.concurrency_support {
-                // Stash the old value of `may_block` and then set it to false.
-                let old_may_block = self
-                    .alias_regions
-                    .vmcomponent()
-                    .task_may_block()
-                    .readonly()
-                    .load(&mut self.builder.cursor(), vmctx);
-                let zero = self.builder.ins().iconst(ir::types::I32, i64::from(0));
-                self.alias_regions.vmcomponent().task_may_block().store(
-                    &mut self.builder.cursor(),
-                    vmctx,
-                    zero,
-                );
-
-                let slot = self.enter_sync_call_inline(instance, def.instance);
-
-                Some((old_may_block, slot))
+                Some(self.enter_sync_call_inline(instance, def.instance))
             } else {
                 None
             }
@@ -1296,15 +1269,8 @@ impl<'a> TrampolineCompiler<'a> {
             self.builder.seal_block(continuation);
         }
 
-        if let Some((old_may_block, slot)) = entered_sync_call {
+        if let Some(slot) = entered_sync_call {
             self.exit_sync_call_inline(vmctx, slot);
-
-            // Restore the old value of `may_block`
-            self.alias_regions.vmcomponent().task_may_block().store(
-                &mut self.builder.cursor(),
-                vmctx,
-                old_may_block,
-            );
         }
 
         self.builder.ins().jump(return_block, &[]);
@@ -1432,11 +1398,9 @@ impl<'a> TrampolineCompiler<'a> {
             .load(&mut self.builder.cursor(), vmctx);
         // Next load the function pointer at `offset` and return that.
         self.alias_regions
-            .component_builtin_functions_array_element(
-                &mut self.builder.cursor(),
-                builtins_array,
-                index,
-            )
+            .vmcomponent()
+            .builtins_array(index)
+            .load(&mut self.builder.cursor(), builtins_array)
     }
 
     /// Get a function's parameters regardless of the ABI in use.
@@ -2390,16 +2354,6 @@ where
         intrinsic: UnsafeIntrinsic,
         params: &[ir::Value],
     ) -> Option<ir::Value> {
-        // This is the width of the type being loaded from Wasmtime's
-        // `VMStoreContext` slot and it depends on the intrinsic.
-        let ty = match intrinsic {
-            UnsafeIntrinsic::ContextGetI32_0
-            | UnsafeIntrinsic::ContextSetI32_0
-            | UnsafeIntrinsic::ContextGetI32_1
-            | UnsafeIntrinsic::ContextSetI32_1 => ir::types::I32,
-            _ => unreachable!(),
-        };
-
         let slot = match intrinsic {
             UnsafeIntrinsic::ContextGetI32_0 | UnsafeIntrinsic::ContextSetI32_0 => 0,
             UnsafeIntrinsic::ContextGetI32_1 | UnsafeIntrinsic::ContextSetI32_1 => 1,
@@ -2411,24 +2365,18 @@ where
                 let context = self
                     .traps
                     .alias_regions()
-                    .vmstore_context_component_context_slot(
-                        &mut self.builder.cursor(),
-                        ty,
-                        vmstore_context,
-                        slot,
-                    );
+                    .vm_store_context()
+                    .component_context(slot)
+                    .load(&mut self.builder.cursor(), vmstore_context);
                 Some(context)
             }
             UnsafeIntrinsic::ContextSetI32_0 | UnsafeIntrinsic::ContextSetI32_1 => {
                 let new_context = params[2];
                 self.traps
                     .alias_regions()
-                    .store_vmstore_context_component_context_slot(
-                        &mut self.builder.cursor(),
-                        vmstore_context,
-                        slot,
-                        new_context,
-                    );
+                    .vm_store_context()
+                    .component_context(slot)
+                    .store(&mut self.builder.cursor(), vmstore_context, new_context);
                 None
             }
             _ => unreachable!(),

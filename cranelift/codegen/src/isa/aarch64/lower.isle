@@ -1743,6 +1743,23 @@
 (rule sshr_64 (lower (sshr $I64 x y))
       (do_shift (ALUOp.Asr) $I64 (put_in_reg_sext64 x) y))
 
+;; Specialized lowerings to generate a single `ubfm`/`sbfm` instruction from
+;; an appropriate pair of `ishl` and `ushr`/`sshr` operations.
+(rule sbfm 1 (lower
+  (sshr (ty_32_or_64 ty) (ishl _ x (u64_from_iconst a)) (u64_from_iconst b)))
+  (bitfield_move ty (BfmOp.SBfm) x (bfm_immr ty a b) (bfm_imms ty a b)))
+(rule ubfm 1 (lower
+  (ushr (ty_32_or_64 ty) (ishl _ x (u64_from_iconst a)) (u64_from_iconst b)))
+  (bitfield_move ty (BfmOp.UBfm) x (bfm_immr ty a b) (bfm_imms ty a b)))
+
+;; Helper methods for constructing the correct `immr` and `imms` immediates.
+(spec (bfm_immr ty a b) (provide true))
+(decl bfm_immr (Type u64 u64) UImm6)
+(extern constructor bfm_immr bfm_immr)
+(spec (bfm_imms ty a b) (provide true))
+(decl bfm_imms (Type u64 u64) UImm6)
+(extern constructor bfm_imms bfm_imms)
+
 ;; Shift for i128.
 (rule (lower (sshr $I128 x y))
       (lower_sshr128 x (value_regs_get y 0)))
@@ -2142,6 +2159,25 @@
       (let ((tmp1 Reg (and_reg ty x c))
             (tmp2 Reg (bic ty y c)))
         (orr ty tmp1 tmp2)))
+
+(attr rule bitselect_i128 (tag i128))
+(rule bitselect_i128 2 (lower (bitselect $I128 c x y))
+      (let ((c ValueRegs (put_in_regs c))
+            (x ValueRegs (put_in_regs x))
+            (y ValueRegs (put_in_regs y))
+            (c_lo Reg (value_regs_get c 0))
+            (c_hi Reg (value_regs_get c 1))
+            (x_lo Reg (value_regs_get x 0))
+            (x_hi Reg (value_regs_get x 1))
+            (y_lo Reg (value_regs_get y 0))
+            (y_hi Reg (value_regs_get y 1))
+            (tmp1_lo Reg (and_reg $I64 x_lo c_lo))
+            (tmp1_hi Reg (and_reg $I64 x_hi c_hi))
+            (tmp2_lo Reg (bic $I64 y_lo c_lo))
+            (tmp2_hi Reg (bic $I64 y_hi c_hi))
+            (res_lo Reg (orr $I64 tmp1_lo tmp2_lo))
+            (res_hi Reg (orr $I64 tmp1_hi tmp2_hi)))
+        (value_regs res_lo res_hi)))
 
 (rule 1 (lower (bitselect (ty_vec128 ty) c x y))
         (bsl ty c x y))
@@ -3015,6 +3051,13 @@
 
 ;;;; Rules for `uadd_overflow` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;; The flags output of a `uadd_overflow` that is not demanded as a materialized
+;; bool (i.e., its only use(s) were folded into consumers such as a `brif` that
+;; consume the flags directly) does not need a `cset`; emit just the `adds`.
+(rule 3 (lower i @ (uadd_overflow (ty_32_or_64 ty) x y))
+        (if-let false (second_result_used i))
+        (output_pair (add ty x y) (value_regs_invalid)))
+
 ;; For values smaller than a register, we do a normal `add` with both arguments
 ;; zero extended. We then check if the output is the same as itself zero extended.
 (rule 1 (lower (uadd_overflow (fits_in_16 ty) a b))
@@ -3090,6 +3133,24 @@
 
 ;;;; Rules for `umul_overflow` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;; The flags output of a `umul_overflow` that is not demanded as a
+;; materialized bool (i.e., its only use(s) were folded into consumers such
+;; as a `brif` that consume the flags directly) does not need the
+;; `cmp`/`cset`; emit just the multiply.
+(rule 5 (lower i @ (umul_overflow (fits_in_16 ty) a b))
+        (if-let false (second_result_used i))
+        (let ((a_uext Reg (put_in_reg_zext32 a))
+              (b_uext Reg (put_in_reg_zext32 b)))
+          (output_pair (madd ty a_uext b_uext (zero_reg)) (value_regs_invalid))))
+
+(rule 4 (lower i @ (umul_overflow $I32 a b))
+        (if-let false (second_result_used i))
+        (output_pair (umaddl a b (zero_reg)) (value_regs_invalid)))
+
+(rule 3 (lower i @ (umul_overflow $I64 a b))
+        (if-let false (second_result_used i))
+        (output_pair (madd $I64 a b (zero_reg)) (value_regs_invalid)))
+
 ;; uxt{b,h} a_ext, a
 ;; uxt{b,h} b_ext, b
 ;; mul out, a_ext, b_ext
@@ -3137,6 +3198,22 @@
              (value_reg out_of))))
 
 ;;;; Rules for `smul_overflow` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; As for `umul_overflow` above: when the flags output is only consumed
+;; folded (e.g., by a `brif`), emit just the multiply.
+(rule 5 (lower i @ (smul_overflow (fits_in_16 ty) a b))
+        (if-let false (second_result_used i))
+        (let ((a_sext Reg (put_in_reg_sext32 a))
+              (b_sext Reg (put_in_reg_sext32 b)))
+          (output_pair (madd ty a_sext b_sext (zero_reg)) (value_regs_invalid))))
+
+(rule 4 (lower i @ (smul_overflow $I32 a b))
+        (if-let false (second_result_used i))
+        (output_pair (smaddl a b (zero_reg)) (value_regs_invalid)))
+
+(rule 3 (lower i @ (smul_overflow $I64 a b))
+        (if-let false (second_result_used i))
+        (output_pair (madd $I64 a b (zero_reg)) (value_regs_invalid)))
 
 ;; sxt{b,h} a_ext, a
 ;; sxt{b,h} b_ext, b

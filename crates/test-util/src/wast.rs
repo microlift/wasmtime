@@ -197,6 +197,11 @@ fn spec_test_config(test: &Path) -> TestConfig {
             {
                 ret.gc = Some(true);
             }
+            if test_name == "throw_ref.wast" {
+                // This test only uses exception references, which do not
+                // require enabling the GC proposal.
+                ret.gc = Some(false);
+            }
             if test_name.contains("return_") || test_name.contains("try_table") {
                 ret.tail_call = Some(true);
             }
@@ -684,6 +689,19 @@ impl WastTest {
             if happens_to_work.iter().any(|part| self.path.ends_with(part)) {
                 return false;
             }
+            return true;
+        }
+
+        // These will require a wasm-tools update:
+        let need_wasm_tools_updates = [
+            "component-model/test/validation/max-value-size.wast",
+            "component-model/test/validation/kebab.wast",
+        ];
+
+        if need_wasm_tools_updates
+            .iter()
+            .any(|part| self.path.ends_with(part))
+        {
             return true;
         }
 
