@@ -4,7 +4,12 @@ Unreleased.
 
 ### Added
 
+- Add `--listenfd` option to `wasmtime serve`, which allows launching wasmtime
+  with sockets inherited from a service manager (e.g. systemd socket units).
+
 ### Changed
+
+- Remove non-functional `listenfd` WASI CLI option.
 
 --------------------------------------------------------------------------------
 

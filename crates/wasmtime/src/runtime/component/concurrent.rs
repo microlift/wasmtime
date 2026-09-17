@@ -685,10 +685,7 @@ enum SuspendReason {
     NeedWork,
     /// The fiber is yielding and should be resumed once other tasks have had a
     /// chance to run.
-    Yielding {
-        thread: QualifiedThreadId,
-        cancellable: bool,
-    },
+    Yielding { thread: QualifiedThreadId },
     /// The fiber was explicitly suspended with a call to `thread.suspend` or `thread.switch-to`.
     ExplicitlySuspending { thread: QualifiedThreadId },
 }
@@ -866,7 +863,7 @@ pub(crate) fn poll_and_block<R: Send + Sync + 'static>(
     // in `GuestTask::result` and resuming this fiber when the host task
     // completes.
     let mut future = Box::pin(async move {
-        let result = future.await?;
+        let result = run_with_host_task_set(task, future).await??;
         tls::get(move |store| {
             let state = store.concurrent_state_mut()?;
             let host_state = &mut state.get_mut(task)?.state;
@@ -1224,7 +1221,13 @@ impl<T> StoreContextMut<'_, T> {
         trap_on_idle: bool,
     ) -> Result<R> {
         debug_assert!(self.0.concurrency_support());
-        check_recursive_run();
+        let already_running = self
+            .0
+            .concurrent_state_mut_already_forced_current_thread()
+            .event_loop_running;
+        if already_running {
+            bail!("Recursive `StoreContextMut::run_concurrent` calls not supported")
+        }
         let token = StoreToken::new(self.as_context_mut());
 
         struct Dropper<'a, T: 'static, V> {
@@ -1640,6 +1643,18 @@ impl<T> StoreContextMut<'_, T> {
     /// Tasks are yielded "youngest first" where the first item in the iterator
     /// is the current task, and the last item in the iterator is the original
     /// call.
+    ///
+    /// # Omitted Tasks
+    ///
+    /// This stack might not contain an entry for every guest-to-guest component
+    /// call that is currently executing: if those guest-to-guest calls are not
+    /// asynchronous and provably cannot access async task state, then Wasmtime
+    /// can avoid materializing the guest task state for that call, and such
+    /// tasks will not have a `GuestTaskId` and will not appear in this stack
+    /// trace.
+    ///
+    /// The `GuestTaskId`s for host-to-guest and guest-to-host calls, however,
+    /// will always appear in this stack trace.
     pub fn async_call_stack(&mut self) -> Result<impl Iterator<Item = GuestTaskId>> {
         let mut cur = Some(self.0.current_thread()?);
         let state = self.0.concurrent_state_mut()?;
@@ -1767,7 +1782,7 @@ impl StoreOpaque {
                 instance: id,
                 index: RuntimeComponentInstanceIndex::from_u32(callee_instance),
             };
-            self.enter_guest_sync_call(None, callee_async, callee)?;
+            self.enter_guest_sync_call(callee_async, callee)?;
         }
 
         // Replaying done; restore the current context.
@@ -1790,18 +1805,6 @@ impl StoreOpaque {
             Some(id) => Ok(id),
             None => bail_bug!("current thread is not a host thread"),
         }
-    }
-
-    /// Returns whether there's a pending cancellation on the current guest thread,
-    /// consuming the event if so.
-    fn take_pending_cancellation(&mut self) -> Result<bool> {
-        let thread = self.current_guest_thread()?;
-        let task = self.concurrent_state_mut()?.get_mut(thread.task)?;
-        if let Some(Event::Cancelled) = task.event {
-            task.event.take();
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     fn enter_sync_call(&mut self, callee: RuntimeInstance) -> Result<()> {
@@ -1846,7 +1849,6 @@ impl StoreOpaque {
     /// sync!
     pub(crate) fn enter_guest_sync_call(
         &mut self,
-        guest_caller: Option<RuntimeInstance>,
         callee_async_typed: bool,
         callee: RuntimeInstance,
     ) -> Result<()> {
@@ -1857,14 +1859,6 @@ impl StoreOpaque {
 
         let thread = self.current_thread()?;
         let state = self.concurrent_state_mut()?;
-        let instance = if let Some(task) = thread.guest_task() {
-            Some(state.get_mut(task)?.instance)
-        } else {
-            None
-        };
-        if guest_caller.is_some() {
-            debug_assert_eq!(instance, guest_caller);
-        }
         let guest_thread = GuestTask::new(
             state,
             Box::new(move |_, _| bail_bug!("cannot lower params in sync call")),
@@ -2179,12 +2173,8 @@ impl StoreOpaque {
                         fiber.dispose(self);
                     }
                 }
-                SuspendReason::Yielding {
-                    thread,
-                    cancellable,
-                } => {
-                    state.get_mut(thread.thread)?.state =
-                        GuestThreadState::Ready { fiber, cancellable };
+                SuspendReason::Yielding { thread } => {
+                    state.get_mut(thread.thread)?.state = GuestThreadState::Ready { fiber };
                     let instance = state.get_mut(thread.task)?.instance;
                     state.push_low_priority(WorkItem::ResumeThread { instance, thread });
                 }
@@ -3433,7 +3423,7 @@ impl Instance {
         // the guest's stack and memory, as well as notifying any waiters that
         // the task returned.
         let future = Box::pin(async move {
-            let result = match future.await {
+            let result = match run_with_host_task_set(task, future).await? {
                 Some(result) => Some(result?),
                 None => None,
             };
@@ -3762,7 +3752,6 @@ impl Instance {
         payload: u32,
     ) -> Result<u32> {
         let &CanonicalOptions {
-            cancellable,
             instance: caller_instance,
             ..
         } = &self.id().get(store).component().env_component().options[options];
@@ -3775,7 +3764,6 @@ impl Instance {
         self.waitable_check(
             store,
             caller,
-            cancellable,
             WaitableCheck::Wait,
             WaitableCheckParams {
                 set: TableId::new(rep),
@@ -3794,7 +3782,6 @@ impl Instance {
         payload: u32,
     ) -> Result<u32> {
         let &CanonicalOptions {
-            cancellable,
             instance: caller_instance,
             ..
         } = &self.id().get(store).component().env_component().options[options];
@@ -3807,7 +3794,6 @@ impl Instance {
         self.waitable_check(
             store,
             caller,
-            cancellable,
             WaitableCheck::Poll,
             WaitableCheckParams {
                 set: TableId::new(rep),
@@ -3969,9 +3955,9 @@ impl Instance {
                     priority,
                 )?;
             }
-            GuestThreadState::Ready { fiber, cancellable } => {
+            GuestThreadState::Ready { fiber } => {
                 log::trace!("resuming thread {thread_id:?} that was ready");
-                thread.state = GuestThreadState::Ready { fiber, cancellable };
+                thread.state = GuestThreadState::Ready { fiber };
                 store
                     .concurrent_state_mut()?
                     .promote_thread_work_item(guest_thread)?;
@@ -4009,15 +3995,9 @@ impl Instance {
         self,
         store: &mut StoreOpaque,
         caller: RuntimeComponentInstanceIndex,
-        cancellable: bool,
         yielding: bool,
         to_thread: SuspensionTarget,
     ) -> Result<WaitResult> {
-        // There could be a pending cancellation from a previous uncancellable wait
-        if cancellable && store.take_pending_cancellation()? {
-            return Ok(WaitResult::Cancelled);
-        }
-
         let check_suspend = match to_thread {
             SuspensionTarget::Promote(thread) => {
                 !self.resume_thread(store, caller, thread, ResumeThread::Promote)?
@@ -4047,7 +4027,6 @@ impl Instance {
         let reason = if yielding {
             SuspendReason::Yielding {
                 thread: guest_thread,
-                cancellable,
             }
         } else {
             SuspendReason::ExplicitlySuspending {
@@ -4057,11 +4036,7 @@ impl Instance {
 
         store.suspend(reason)?;
 
-        if cancellable && store.take_pending_cancellation()? {
-            Ok(WaitResult::Cancelled)
-        } else {
-            Ok(WaitResult::Completed)
-        }
+        Ok(WaitResult::Completed)
     }
 
     /// Helper function for the `waitable-set.wait` and `waitable-set.poll` intrinsics.
@@ -4069,7 +4044,6 @@ impl Instance {
         self,
         store: &mut StoreOpaque,
         caller: RuntimeInstance,
-        cancellable: bool,
         check: WaitableCheck,
         params: WaitableCheckParams,
     ) -> Result<u32> {
@@ -4086,22 +4060,10 @@ impl Instance {
             WaitableCheck::Wait => {
                 let set = params.set;
 
-                if (task.event.is_none()
-                    || (matches!(task.event, Some(Event::Cancelled)) && !cancellable))
+                if (task.event.is_none() || matches!(task.event, Some(Event::Cancelled)))
                     && state.get_mut(set)?.ready.is_empty()
                 {
                     store.switch_or_trap_if_may_not_suspend(caller)?;
-
-                    if cancellable {
-                        let old = store
-                            .concurrent_state_mut()?
-                            .get_mut(guest_thread.thread)?
-                            .wake_on_cancel
-                            .replace(set);
-                        if !old.is_none() {
-                            bail_bug!("thread unexpectedly in a prior wake_on_cancel set");
-                        }
-                    }
 
                     store.suspend(SuspendReason::Waiting {
                         set,
@@ -4118,7 +4080,7 @@ impl Instance {
         );
 
         // Deliver any pending events to the guest and return.
-        let event = self.get_event(store, guest_thread.task, Some(params.set), cancellable)?;
+        let event = self.get_event(store, guest_thread.task, Some(params.set), false)?;
 
         let (ordinal, handle, result) = match &check {
             WaitableCheck::Wait => {
@@ -4258,10 +4220,7 @@ impl Instance {
                         let set = state.get_mut(caller.thread)?.sync_call_set;
                         waitable.join(state, Some(set))?;
 
-                        store.suspend(SuspendReason::Yielding {
-                            thread: caller,
-                            cancellable: false,
-                        })?;
+                        store.suspend(SuspendReason::Yielding { thread: caller })?;
 
                         let state = store.concurrent_state_mut()?;
                         waitable.join(state, None)?;
@@ -4298,19 +4257,6 @@ impl Instance {
                             None => bail_bug!("thread not present in wake_on_cancel set"),
                         };
                         concurrent_state.set_switch_item(item)?;
-
-                        yield_(store)?;
-
-                        break;
-                    } else if let GuestThreadState::Ready {
-                        cancellable: true, ..
-                    } = &thread_mut.state
-                    {
-                        // The thread is in a cancellable yield, so yield back
-                        // to it.
-                        if !concurrent_state.promote_thread_work_item(thread)? {
-                            bail_bug!("a ready thread should have been promotable");
-                        }
 
                         yield_(store)?;
 
@@ -4844,6 +4790,27 @@ impl<T: 'static> VMComponentAsyncStore for StoreInner<T> {
 
 type HostTaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 
+/// Runs the given future with the current thread set to `task` each time it is
+/// polled.
+async fn run_with_host_task_set<F>(task: TableId<HostTask>, future: F) -> Result<F::Output>
+where
+    F: Future,
+{
+    let mut future = pin!(future);
+    future::poll_fn(|cx| {
+        let old_thread = match tls::get(|store| store.set_thread(task)) {
+            Ok(thread) => thread,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        let result = future.as_mut().poll(cx);
+        match tls::get(|store| store.set_thread(old_thread)) {
+            Ok(_) => result.map(Ok),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    })
+    .await
+}
+
 /// Represents the state of a pending host task.
 ///
 /// This is used to represent tasks when the guest calls into the host.
@@ -4977,7 +4944,6 @@ enum GuestThreadState {
     Suspended(StoreFiber<'static>),
     Ready {
         fiber: StoreFiber<'static>,
-        cancellable: bool,
     },
     Completed,
 }
@@ -4989,10 +4955,7 @@ impl fmt::Debug for GuestThreadState {
             Self::NotStartedExplicit(_) => f.debug_tuple("NotStartedExplicit").finish(),
             Self::Running => f.debug_tuple("Running").finish(),
             Self::Suspended(_) => f.debug_tuple("Suspended").finish(),
-            Self::Ready { cancellable, .. } => f
-                .debug_struct("Ready")
-                .field("cancellable", cancellable)
-                .finish(),
+            Self::Ready { .. } => f.debug_struct("Ready").finish(),
             Self::Completed => f.debug_tuple("Completed").finish(),
         }
     }
@@ -6099,16 +6062,6 @@ fn check_ambient_store(id: StoreId) {
 
         if !matched {
             panic!("{message}")
-        }
-    });
-}
-
-/// Assert that `StoreContextMut::run_concurrent` has not been called from
-/// within an store's event loop.
-fn check_recursive_run() {
-    tls::try_get(|store| {
-        if !matches!(store, tls::TryGet::None) {
-            panic!("Recursive `StoreContextMut::run_concurrent` calls not supported")
         }
     });
 }

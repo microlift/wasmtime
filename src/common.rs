@@ -285,6 +285,7 @@ impl RunCommon {
             None => {
                 let mut code = wasmtime::CodeBuilder::new(engine);
                 code.wasm_binary_or_text(bytes, Some(path))?;
+                crate::code_builder::configure_code_builder(&self.common, &mut code)?;
                 match code.hint() {
                     Some(wasmtime::CodeHint::Component) => {
                         #[cfg(feature = "component-model")]
@@ -356,9 +357,6 @@ impl RunCommon {
             builder.initial_cwd(cwd);
         }
 
-        if self.common.wasi.listenfd == Some(true) {
-            bail!("components do not support --listenfd");
-        }
         for _ in self.compute_preopen_sockets()? {
             bail!("components do not support --tcplisten");
         }

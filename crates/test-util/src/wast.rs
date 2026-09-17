@@ -252,6 +252,7 @@ fn component_test_config(test: &Path) -> TestConfig {
     ret.reference_types = Some(true);
     ret.multi_memory = Some(true);
     ret.component_model_implements = Some(true);
+    ret.component_model_canonical_names = Some(true);
     ret.bulk_memory = Some(true);
     ret.component_model_async = Some(true);
     ret.component_model_more_async_builtins = Some(true);
@@ -347,6 +348,7 @@ macro_rules! foreach_config_option {
             component_model_memory64
             component_model_fixed_length_lists
             component_model_implements
+            component_model_canonical_names
             simd
             gc_types
             exceptions
@@ -689,19 +691,6 @@ impl WastTest {
             if happens_to_work.iter().any(|part| self.path.ends_with(part)) {
                 return false;
             }
-            return true;
-        }
-
-        // These will require a wasm-tools update:
-        let need_wasm_tools_updates = [
-            "component-model/test/validation/max-value-size.wast",
-            "component-model/test/validation/kebab.wast",
-        ];
-
-        if need_wasm_tools_updates
-            .iter()
-            .any(|part| self.path.ends_with(part))
-        {
             return true;
         }
 

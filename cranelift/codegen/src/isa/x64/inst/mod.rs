@@ -1467,7 +1467,9 @@ impl MachInst for Inst {
 
     fn is_safepoint(&self) -> bool {
         match self {
-            Inst::CallKnown { .. } | Inst::CallUnknown { .. } => true,
+            Inst::CallKnown { .. } | Inst::CallUnknown { .. } | Inst::StackSwitchBasic { .. } => {
+                true
+            }
             _ => false,
         }
     }
@@ -1594,6 +1596,10 @@ impl asm::AvailableFeatures for &EmitInfo {
 
     fn avx512vnni(&self) -> bool {
         self.isa_flags.has_avx512vnni()
+    }
+
+    fn apx(&self) -> bool {
+        self.isa_flags.has_apx()
     }
 }
 

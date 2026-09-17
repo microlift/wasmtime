@@ -172,9 +172,6 @@ pub struct AdapterOptions {
     pub post_return: Option<dfg::CoreDef>,
     /// Whether to use the async ABI for lifting or lowering.
     pub async_: bool,
-    /// Whether or not this intrinsic can consume a task cancellation
-    /// notification.
-    pub cancellable: bool,
     /// The core function type that is being lifted from / lowered to.
     pub core_type: ModuleInternedTypeIndex,
     /// The data model used by this adapter: linear memory or GC objects.
@@ -211,7 +208,7 @@ impl<'data> Translator<'_, 'data> {
             let mut names = Vec::with_capacity(adapter_module.adapters.len());
             for adapter in adapter_module.adapters.iter() {
                 let name = format!("adapter{}", adapter.as_u32());
-                module.adapt(&name, &component.adapters[*adapter]);
+                module.adapt(&name, component, *adapter);
                 names.push(name);
             }
             let wasm = module.encode();

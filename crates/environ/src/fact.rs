@@ -18,11 +18,11 @@
 //! their imports and then generating a core wasm module to implement all of
 //! that.
 
-use crate::component::dfg::CoreDef;
+use crate::component::dfg::{AdapterId, ComponentDfg, CoreDef};
 use crate::component::{
-    Adapter, AdapterOptions as AdapterOptionsDfg, CanonicalAbiInfo, ComponentTypesBuilder,
-    FlatType, InterfaceType, RuntimeComponentInstanceIndex, StringEncoding, Transcode,
-    TypeFuncIndex, UnsafeIntrinsic,
+    AdapterOptions as AdapterOptionsDfg, CanonicalAbiInfo, ComponentTypesBuilder, FlatType,
+    InterfaceType, RuntimeComponentInstanceIndex, StringEncoding, Transcode, TypeFuncIndex,
+    UnsafeIntrinsic,
 };
 use crate::fact::transcode::Transcoder;
 use crate::prelude::*;
@@ -125,6 +125,12 @@ struct AdapterData {
     /// The core wasm function that this adapter will be calling (the original
     /// function that was `canon lift`'d)
     callee: FuncIndex,
+    /// Whether nothing this adapter can reach is able to observe or mutate the
+    /// thread state that `enter-sync-call`/`exit-sync-call` maintain, meaning
+    /// that pair can be omitted entirely.
+    ///
+    /// See `crates/environ/src/component/thread_transparency.rs` for details.
+    thread_transparent: bool,
 }
 
 /// Configuration options which apply at the "global adapter" level.
@@ -299,8 +305,12 @@ impl<'a> Module<'a> {
     /// Registers a new adapter within this adapter module.
     ///
     /// The `name` provided is the export name of the adapter from the final
-    /// module, and `adapter` contains all metadata necessary for compilation.
-    pub fn adapt(&mut self, name: &str, adapter: &Adapter) {
+    /// module, and `adapter` indexes into `component` for all the metadata
+    /// necessary for compilation.
+    pub fn adapt(&mut self, name: &str, component: &ComponentDfg, adapter: AdapterId) {
+        let thread_transparent = component.transparent_adapters.contains(adapter);
+        let adapter = &component.adapters[adapter];
+
         // Import any items required by the various canonical options
         // (memories, reallocs, etc)
         let mut lift = self.import_options(adapter.lift_ty, &adapter.lift_options);
@@ -335,6 +345,7 @@ impl<'a> Module<'a> {
                 lift,
                 lower,
                 callee,
+                thread_transparent,
             },
         );
 
@@ -352,9 +363,7 @@ impl<'a> Module<'a> {
             async_,
             core_type,
             data_model,
-            cancellable,
         } = options;
-        assert!(!cancellable);
 
         let flags = self.import_global(
             "flags",
@@ -722,7 +731,7 @@ impl<'a> Module<'a> {
         self.import_simple(
             "async",
             "enter-sync-call",
-            &[ValType::I32; 3],
+            &[ValType::I32; 2],
             &[],
             Import::EnterSyncCall,
             |me| &mut me.imported_enter_sync_call,

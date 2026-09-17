@@ -7,6 +7,7 @@ use pin_project_lite::pin_project;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::net::SocketAddr;
+use std::net::TcpListener as StdTcpListener;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{
@@ -18,6 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::io::{self, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
 use wasmtime::component::{Component, GuestTaskId, Linker};
 use wasmtime::error::Context as _;
@@ -121,6 +123,11 @@ pub struct ServeCommand {
     #[arg(long)]
     no_logging_prefix: bool,
 
+    /// Use sockets passed via the 'LISTEN_FDS' environment variable (set e.g. by systemd when
+    /// launching a service from socket units). Not available on Windows.
+    #[arg(long)]
+    systemd_listenfd: bool,
+
     /// The WebAssembly component to run.
     #[arg(value_name = "WASM", required = true)]
     component: PathBuf,
@@ -171,6 +178,18 @@ pub struct ServeCommand {
 impl ServeCommand {
     /// Start a server to run the given wasi-http proxy component
     pub fn execute(mut self) -> Result<()> {
+        let inherited_socket = if self.systemd_listenfd {
+            Some(
+                unsafe {
+                    // Safety: Called early before any other file descriptors are opened.
+                    Self::inherit_socket()
+                }
+                .with_context(|| "Failed to resolve inherited sockets")?,
+            )
+        } else {
+            None
+        };
+
         self.run.common.init_logging()?;
 
         // We force cli errors before starting to listen for connections so then
@@ -201,7 +220,7 @@ impl ServeCommand {
             .enable_io()
             .build()?;
 
-        runtime.block_on(self.serve())?;
+        runtime.block_on(self.serve(inherited_socket))?;
 
         Ok(())
     }
@@ -312,6 +331,7 @@ impl ServeCommand {
         mut debug_run: RunCommand,
         linker: Linker<Host>,
         component: Component,
+        inherited_socket: Option<StdTcpListener>,
     ) -> Result<()> {
         let mut debuggee_store = self.new_store(linker.engine(), None)?;
 
@@ -345,7 +365,14 @@ impl ServeCommand {
                 &debug_component,
                 &mut debug_linker,
                 debuggee_store,
-                move |store| Box::pin(self.serve_maybe_debug(linker, component, Some(store))),
+                move |store| {
+                    Box::pin(self.serve_maybe_debug(
+                        linker,
+                        component,
+                        Some(store),
+                        inherited_socket,
+                    ))
+                },
             )
             .await
     }
@@ -530,7 +557,7 @@ impl ServeCommand {
         Ok(())
     }
 
-    async fn serve(mut self) -> Result<()> {
+    async fn serve(mut self, inherited_socket: Option<StdTcpListener>) -> Result<()> {
         #[cfg(feature = "debug")]
         let debug_run = self.debugger_setup()?;
 
@@ -567,11 +594,12 @@ impl ServeCommand {
         #[cfg(feature = "debug")]
         if let Some(debug_run) = debug_run {
             return self
-                .serve_under_debugger(debug_run, linker, component)
+                .serve_under_debugger(debug_run, linker, component, inherited_socket)
                 .await;
         }
 
-        self.serve_maybe_debug(linker, component, None).await
+        self.serve_maybe_debug(linker, component, None, inherited_socket)
+            .await
     }
 
     async fn serve_maybe_debug(
@@ -579,6 +607,7 @@ impl ServeCommand {
         linker: Linker<Host>,
         component: Component,
         mut debuggee_store: Option<&mut Store<Host>>,
+        inherited_socket: Option<StdTcpListener>,
     ) -> Result<()> {
         let engine = linker.engine();
         let request_headers = RequestHeaders::parse(&self.headers)?;
@@ -615,25 +644,35 @@ impl ServeCommand {
             });
         }
 
-        let socket = match &self.addr {
-            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
-            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+        let listener = match inherited_socket {
+            Some(listener) => {
+                eprintln!("Serving HTTP on inherited socket");
+                log::info!("Listening on inherited socket");
+
+                TcpListener::from_std(listener)?
+            }
+            None => {
+                let socket = match &self.addr {
+                    SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+                    SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+                };
+                // Conditionally enable `SO_REUSEADDR` depending on the current
+                // platform. On Unix we want this to be able to rebind an address in
+                // the `TIME_WAIT` state which can happen then a server is killed with
+                // active TCP connections and then restarted. On Windows though if
+                // `SO_REUSEADDR` is specified then it enables multiple applications to
+                // bind the port at the same time which is not something we want. Hence
+                // this is conditionally set based on the platform (and deviates from
+                // Tokio's default from always-on).
+                socket.set_reuseaddr(!cfg!(windows))?;
+                socket.bind(self.addr)?;
+                let listener = socket.listen(100)?;
+
+                eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
+                log::info!("Listening on {}", self.addr);
+                listener
+            }
         };
-        // Conditionally enable `SO_REUSEADDR` depending on the current
-        // platform. On Unix we want this to be able to rebind an address in
-        // the `TIME_WAIT` state which can happen then a server is killed with
-        // active TCP connections and then restarted. On Windows though if
-        // `SO_REUSEADDR` is specified then it enables multiple applications to
-        // bind the port at the same time which is not something we want. Hence
-        // this is conditionally set based on the platform (and deviates from
-        // Tokio's default from always-on).
-        socket.set_reuseaddr(!cfg!(windows))?;
-        socket.bind(self.addr)?;
-        let listener = socket.listen(100)?;
-
-        eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
-
-        log::info!("Listening on {}", self.addr);
 
         let epoch_interval = if let Some(Profile::Guest { interval, .. }) = self.run.profile {
             Some(interval)
@@ -752,6 +791,92 @@ impl ServeCommand {
         }
 
         Ok(())
+    }
+
+    /// Takes ownership of file descriptors this process has inherited from a parent process like a
+    /// service manager.
+    ///
+    /// These are looked up with the [protocol from systemd](https://www.freedesktop.org/software/systemd/man/latest/sd_listen_fds.html#Notes).
+    /// This is used to implement socket activation for `wasmtime serve`.
+    ///
+    /// ## Safety
+    ///
+    /// This function takes ownership of raw file descriptors and must be called before any other
+    /// file descriptors are opened.
+    #[cfg(unix)]
+    unsafe fn inherit_socket() -> Result<StdTcpListener> {
+        use rustix::fs::{FileType, fstat};
+        use rustix::net::{AddressFamily, SocketType, getsockname, sockopt::socket_type};
+        use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+        use std::{env, process};
+        use wasmtime::format_err;
+
+        // The logic here is taken from https://github.com/systemd/systemd/blob/main/src/libsystemd/sd-daemon/sd-daemon.c.
+        if !env::var("LISTEN_PID")
+            .ok()
+            .and_then(|pid| pid.parse().ok())
+            .is_some_and(|pid: u32| pid == process::id())
+        {
+            bail!("Missing or mismatched LISTEN_PID environment variable");
+        }
+
+        let Some(num_fds) = env::var("LISTEN_FDS")
+            .ok()
+            .and_then(|fds| fds.parse().ok())
+            .take_if(|e| *e >= 1)
+        else {
+            bail!("Missing or invalid LISTEN_FDS environment variable");
+        };
+
+        let first_fd: RawFd = 3;
+        let Some(last_fd) = first_fd.checked_add(num_fds) else {
+            bail!("Invalid amount of file descriptors in LISTEN_FDS");
+        };
+
+        let mut first_tcp_socket = None;
+        // We want to take ownership of all file descriptors here, but only use the first socket to
+        // listen on it.
+        for fd in first_fd..last_fd {
+            let fd = unsafe {
+                // Safety: We're calling this first in Self::execute(), before any other file
+                // descriptors part from stdin, stdout and stderr are opened.
+                OwnedFd::from_raw_fd(fd)
+            };
+
+            // Set the close-on-exec flag, matching libsystemd.
+            #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+            rustix::io::ioctl_fioclex(&fd)?;
+
+            // Check if this file descriptor is a TCP socket.
+            let stat = fstat(&fd)?;
+            if !FileType::from_raw_mode(stat.st_mode).is_socket() {
+                continue;
+            }
+
+            let address_family = getsockname(&fd)?.address_family();
+            if address_family != AddressFamily::INET && address_family != AddressFamily::INET6 {
+                continue;
+            }
+
+            if socket_type(&fd)? != SocketType::STREAM {
+                continue;
+            }
+
+            if !first_tcp_socket.is_none() {
+                bail!("Inherited multiple TCP sockets, which is unsupported.")
+            }
+
+            let listener = StdTcpListener::from(fd);
+            listener.set_nonblocking(true)?;
+            first_tcp_socket = Some(listener);
+        }
+
+        first_tcp_socket.ok_or_else(|| format_err!("No TCP socket inherited"))
+    }
+
+    #[cfg(not(unix))]
+    unsafe fn inherit_socket() -> Result<StdTcpListener> {
+        bail!("The --listenfd option is not available on Windows")
     }
 }
 

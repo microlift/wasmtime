@@ -1439,10 +1439,10 @@ mod test_programs {
             let mut cmd = super::get_wasmtime_command()?;
             cmd.arg("serve").arg("--addr=127.0.0.1:0").arg(wasm);
             configure(&mut cmd);
-            Self::spawn(&mut cmd)
+            Self::spawn(&mut cmd, None)
         }
 
-        fn spawn(cmd: &mut Command) -> Result<WasmtimeServe> {
+        fn spawn(cmd: &mut Command, inherited_addr: Option<SocketAddr>) -> Result<WasmtimeServe> {
             cmd.arg("--shutdown-addr=127.0.0.1:0");
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());
@@ -1475,7 +1475,10 @@ mod test_programs {
                 }
             };
             let shutdown_addr = read_addr_from_line("Listening for shutdown");
-            let addr = read_addr_from_line("Serving HTTP on");
+            let addr = match inherited_addr {
+                Some(addr) => Ok(addr),
+                None => read_addr_from_line("Serving HTTP on"),
+            };
             let (shutdown_addr, addr) = match (shutdown_addr, addr) {
                 (Ok(a), Ok(b)) => (a, b),
                 // If either failed kill the child and otherwise try to shepherd
@@ -1803,6 +1806,7 @@ mod test_programs {
                 .arg("-Scli")
                 .arg(format!("--addr={}", server.addr))
                 .arg(wasm),
+            None,
         )
         .err()
         .expect("server spawn should have failed but it succeeded");
@@ -1860,6 +1864,7 @@ mod test_programs {
                 .arg("-Scli")
                 .arg(format!("--addr={addr}"))
                 .arg(wasm),
+            None,
         )?;
 
         Ok(())
@@ -2543,6 +2548,74 @@ start a print 1234
             },
         )
         .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_inherit() -> Result<()> {
+        use rustix::fd::AsRawFd;
+        use std::mem::ManuallyDrop;
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
+        use tokio::net::TcpListener;
+
+        // We can't easily inherit file descriptors to emulators like QEMU, so skip this test for
+        // cross-compiled setups.
+        if wasmtime_test_util::cargo_test_runner().is_some() {
+            return Ok(());
+        }
+
+        // This socket is required to be inherited to the child process as fd 3.
+        // This is done with a `dup2` below. If this socket is itself 3,
+        // however, then the `dup2` will be a noop. This `socket` is CLOEXEC,
+        // however, so if `dup2` is a noop then nothing will be inherited. Force
+        // this socket to NOT be fd 3 in this case by `dup`-ing it.
+        let mut socket = std::net::TcpListener::bind("localhost:0")?;
+        if socket.as_raw_fd() == 3 {
+            socket = socket.try_clone()?;
+            assert!(socket.as_raw_fd() != 3);
+        }
+        let addr = socket.local_addr()?;
+        socket.set_nonblocking(true)?;
+        let socket = TcpListener::from_std(socket)?;
+
+        // Using a shell script as a launcher since that uses exec, allowing us to provide the
+        // LISTEN_PID variable.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(r#"export LISTEN_FDS=1 LISTEN_PID=$$; exec "$@""#)
+            .arg("sh")
+            .arg(super::get_wasmtime_path())
+            .arg("serve")
+            .arg("-Scli")
+            .arg("--systemd-listenfd")
+            .arg(P2_CLI_SERVE_HELLO_WORLD_COMPONENT)
+            .env("WASMTIME_CODEGEN_CACHE", "n");
+        unsafe {
+            cmd.pre_exec(move || {
+                let mut target = ManuallyDrop::new(OwnedFd::from_raw_fd(3));
+                rustix::io::dup2(&socket, &mut target)?;
+                Ok(())
+            });
+        }
+
+        let server = WasmtimeServe::spawn(&mut cmd, Some(addr))?;
+        let resp = server
+            .send_request(
+                hyper::Request::builder()
+                    .uri("http://localhost/")
+                    .body(String::new())
+                    .context("failed to make request")?,
+            )
+            .await?;
+
+        assert!(resp.status().is_success());
+        assert_eq!(resp.body(), "Hello, WASI!");
+
+        let (_, stderr) = server.finish()?;
+        assert!(stderr.contains("Serving HTTP on inherited socket"));
+
+        Ok(())
     }
 
     async fn cli_serve_hello_world(
@@ -3596,5 +3669,222 @@ fn environment_configuration() -> Result<()> {
         .env("WASMTIME_WASM", "component-model=n")
         .env("WASMTIME_WASM_COMPONENT_MODEL", "y"),
     )?;
+    Ok(())
+}
+
+#[test]
+fn unsafe_intrinsics_bare_flag() -> Result<()> {
+    // The bare flag defaults the import name to `unsafe-intrinsics`, which is
+    // what the component imports.
+    run_wasmtime(&[
+        "-Wcomponent-model",
+        "-C",
+        "unsafe-intrinsics",
+        "tests/all/cli_tests/unsafe-intrinsics.wat",
+    ])?;
+    Ok(())
+}
+
+#[test]
+fn unsafe_intrinsics_named() -> Result<()> {
+    run_wasmtime(&[
+        "-Wcomponent-model",
+        "-C",
+        "unsafe-intrinsics=unsafe-intrinsics",
+        "tests/all/cli_tests/unsafe-intrinsics.wat",
+    ])?;
+
+    // Exposing the intrinsics under a different name leaves the component's
+    // import unsatisfied.
+    let output = get_wasmtime_command()?
+        .args(&[
+            "-Wcomponent-model",
+            "-C",
+            "unsafe-intrinsics=some-other-name",
+            "tests/all/cli_tests/unsafe-intrinsics.wat",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("component imports instance `unsafe-intrinsics`"),
+        "bad stderr: {stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn unsafe_intrinsics_rejects_core_module() -> Result<()> {
+    let output = get_wasmtime_command()?
+        .args(&["-C", "unsafe-intrinsics", "tests/all/cli_tests/simple.wat"])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("can only be used with components"),
+        "bad stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn compile_time_builtins() -> Result<()> {
+    // The main component traps unless both builtins are actually linked in and
+    // return their expected values.
+    run_wasmtime(&[
+        "-Wcomponent-model",
+        "-C",
+        "unsafe-intrinsics",
+        "-C",
+        "inlining=y",
+        "-C",
+        "compile-time-builtin=host-api-a=tests/all/cli_tests/host-api-a.wat",
+        "-C",
+        "compile-time-builtin=host-api-b=tests/all/cli_tests/host-api-b.wat",
+        "tests/all/cli_tests/compile-time-builtin-main.wat",
+    ])?;
+    Ok(())
+}
+
+#[test]
+fn compile_time_builtin_name_defaults_to_file_stem() -> Result<()> {
+    // Both fixtures' file stems are exactly the import names they satisfy, so
+    // the `<name>=` prefix can be omitted.
+    run_wasmtime(&[
+        "-Wcomponent-model",
+        "-C",
+        "unsafe-intrinsics",
+        "-C",
+        "compile-time-builtin=tests/all/cli_tests/host-api-a.wat",
+        "-C",
+        "compile-time-builtin=tests/all/cli_tests/host-api-b.wat",
+        "tests/all/cli_tests/compile-time-builtin-main.wat",
+    ])?;
+
+    // A file whose stem is *not* the import name leaves `host-api-b`
+    // unsatisfied.
+    let td = TempDir::new()?;
+    let other = td.path().join("some-other-name.wat");
+    std::fs::copy("tests/all/cli_tests/host-api-b.wat", &other)?;
+    let output = get_wasmtime_command()?
+        .args(&[
+            "-Wcomponent-model",
+            "-C",
+            "unsafe-intrinsics",
+            "-C",
+            "compile-time-builtin=tests/all/cli_tests/host-api-a.wat",
+            "-C",
+            &format!("compile-time-builtin={}", other.display()),
+            "tests/all/cli_tests/compile-time-builtin-main.wat",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("host-api-b"), "bad stderr: {stderr}");
+
+    Ok(())
+}
+
+#[test]
+fn compile_time_builtins_require_intrinsics() -> Result<()> {
+    let output = get_wasmtime_command()?
+        .args(&[
+            "-Wcomponent-model",
+            "-C",
+            "compile-time-builtin=tests/all/cli_tests/host-api-a.wat",
+            "-C",
+            "compile-time-builtin=tests/all/cli_tests/host-api-b.wat",
+            "tests/all/cli_tests/compile-time-builtin-main.wat",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must configure the unsafe-intrinsics import"),
+        "bad stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn compile_time_builtin_bad_syntax() -> Result<()> {
+    // Empty value: there is no file stem to derive a name from.
+    let output = get_wasmtime_command()?
+        .args(&[
+            "-C",
+            "compile-time-builtin=",
+            "tests/all/cli_tests/simple.wat",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot derive a compile-time builtin name"),
+        "bad stderr: {stderr}"
+    );
+
+    // Empty name in the explicit `<name>=<path>` form.
+    let output = get_wasmtime_command()?
+        .args(&[
+            "-C",
+            "compile-time-builtin==host-api-a.wat",
+            "tests/all/cli_tests/simple.wat",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("name cannot be empty"),
+        "bad stderr: {stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn compile_time_builtin_missing_file() -> Result<()> {
+    let output = get_wasmtime_command()?
+        .args(&[
+            "-Wcomponent-model",
+            "-C",
+            "unsafe-intrinsics",
+            "-C",
+            "compile-time-builtin=host-api-a=tests/all/cli_tests/does-not-exist.wat",
+            "tests/all/cli_tests/compile-time-builtin-main.wat",
+        ])
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tests/all/cli_tests/does-not-exist.wat"),
+        "bad stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn compile_time_builtins_compile_subcommand() -> Result<()> {
+    let td = TempDir::new()?;
+    let cwasm = td.path().join("compile-time-builtin-main.cwasm");
+    run_wasmtime(&[
+        "compile",
+        "-C",
+        "unsafe-intrinsics",
+        "-C",
+        "compile-time-builtin=tests/all/cli_tests/host-api-a.wat",
+        "-C",
+        "compile-time-builtin=tests/all/cli_tests/host-api-b.wat",
+        "-o",
+        cwasm.to_str().unwrap(),
+        "tests/all/cli_tests/compile-time-builtin-main.wat",
+    ])?;
+
+    run_wasmtime(&[
+        "-Wcomponent-model",
+        "--allow-precompiled",
+        cwasm.to_str().unwrap(),
+    ])?;
+
     Ok(())
 }

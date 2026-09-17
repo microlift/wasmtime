@@ -1,7 +1,7 @@
 mod gc;
 pub(crate) mod stack_switching;
 
-use crate::alias_region::AliasRegions;
+use crate::alias_region::{AliasRegions, GcAccess};
 use crate::compiler::Compiler;
 use crate::translate::{
     FuncTranslationStacks, Heap, HeapData, MemoryKind, StructFieldsVec, TableData, TableSize,
@@ -45,6 +45,20 @@ use wasmtime_environ::{
     WasmStorageType, WasmValType,
 };
 use wasmtime_environ::{FUNCREF_INIT_BIT, FUNCREF_MASK};
+
+/// Function-local stack slots backing a continuation's
+/// `VMPayloads::values`.
+///
+/// The values and their GC-reference markers are logically one
+/// payload descriptor but use distinct stack slots so that Cranelift
+/// can assign them distinct alias regions. The marker slot is only
+/// allocated when this function contains a stack switching site whose
+/// payloads may contain GC references.
+#[derive(Clone, Copy)]
+pub(crate) struct VMPayloadStackSlots {
+    pub(crate) values: ir::StackSlot,
+    pub(crate) gc_ref_markers: Option<ir::StackSlot>,
+}
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum Extension {
@@ -216,10 +230,12 @@ pub struct FuncEnvironment<'module_environment> {
     /// current stack's `handler_list` field.
     stack_switching_handler_list_buffer: Option<ir::StackSlot>,
 
-    /// Used by the stack switching feature. If set, we have a allocated a
-    /// slot on this function's stack to be used for the
-    /// current continuation's `values` field.
-    stack_switching_values_buffer: Option<ir::StackSlot>,
+    /// Used by the stack switching feature. If set, these are the stack slots
+    /// backing the current continuation's `values` field.
+    stack_switching_values_storage: Option<VMPayloadStackSlots>,
+
+    /// Reusable storage for `get_interned_contref` builtin.
+    stack_switching_cont_ref_result_storage: Option<ir::StackSlot>,
 
     /// The stack-slot used for exposing Wasm state via debug
     /// instrumentation, if any, and the builder containing its metadata.
@@ -300,7 +316,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             stack_limit_at_function_entry: None,
 
             stack_switching_handler_list_buffer: None,
-            stack_switching_values_buffer: None,
+            stack_switching_values_storage: None,
+            stack_switching_cont_ref_result_storage: None,
 
             state_slot: None,
             next_srcloc: ir::SourceLoc::default(),
@@ -311,6 +328,18 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
 
             alias_regions: AliasRegions::new(offsets),
         }
+    }
+
+    /// Returns the cached continuation-reference stack slot, creating it with
+    /// `data` if necessary.
+    pub(crate) fn get_or_create_contref_stack_slot(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        data: ir::StackSlotData,
+    ) -> ir::StackSlot {
+        *self
+            .stack_switching_cont_ref_result_storage
+            .get_or_insert_with(|| builder.create_sized_stack_slot(data))
     }
 
     /// Consume the branch hint for the instruction at module-relative `offset`
@@ -469,7 +498,11 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         match entity {
             CheckedEntity::Memory(index) => self.memory_alias_region(func, index),
             CheckedEntity::Table { table, .. } => self.table_alias_region(func, table),
-            CheckedEntity::Array { .. } => self.alias_regions.gc_heap_region(func),
+            CheckedEntity::Array { ty, .. } => self.alias_regions.gc_access_region(
+                func,
+                self.types,
+                GcAccess::ArrayElements { ty },
+            ),
             CheckedEntity::Elem(_) => self.alias_regions.element_segment_region(func),
             CheckedEntity::Data { .. } | CheckedEntity::RuntimeData(_) => {
                 self.alias_regions.data_segment_region(func)
@@ -2078,8 +2111,8 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
     /// defers the heavyweight task bookkeeping the `enter_sync_call` libcall
     /// would otherwise do eagerly.
     ///
-    /// `real_call_args` is `[callee_vmctx, caller_vmctx, caller_instance,
-    /// callee_async, callee_instance]`.
+    /// `real_call_args` is `[callee_vmctx, caller_vmctx, callee_async,
+    /// callee_instance]`.
     fn lower_fact_enter_sync_call(&mut self, real_call_args: &[ir::Value]) -> CallRets {
         let vmctx = self.env.vmctx_val(&mut self.builder.cursor());
         let slot = crate::component_sync_call::enter(
@@ -2087,9 +2120,8 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
             &mut self.env.alias_regions,
             vmctx,
             crate::component_sync_call::EnterArgs {
-                caller_instance: real_call_args[2],
-                callee_async: real_call_args[3],
-                callee_instance: real_call_args[4],
+                callee_async: real_call_args[2],
+                callee_instance: real_call_args[3],
             },
         );
 
@@ -2438,6 +2470,14 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
                     Some(tag) => ExceptionTableItem::Tag(tag, block_call),
                     None => ExceptionTableItem::Default(block_call),
                 });
+
+                // Tags are matched left-to-right in CLIF, so once a catch-all
+                // tag is pushed there's no more need to push any other
+                // handlers, even if present, as they're not going to be
+                // executed anyway.
+                if tag.is_none() {
+                    break;
+                }
             }
             let etd = ExceptionTableData::new(sig, continuation, handlers);
             let et = self.builder.func.dfg.exception_tables.push(etd);
@@ -3924,9 +3964,14 @@ impl FuncEnvironment<'_> {
                     initialized,
                 )?
             }
-            CheckedEntity::Array { initialized, .. } => {
+            CheckedEntity::Array {
+                initialized, ty, ..
+            } => {
+                let access = GcAccess::ArrayElements { ty };
                 if is_pre_interned_funcref {
-                    let region = self.alias_regions.gc_heap_region(builder.func);
+                    let region =
+                        self.alias_regions
+                            .gc_access_region(builder.func, self.types, access);
                     builder.ins().store(
                         ir::MemFlagsData::trusted()
                             .with_endianness(Endianness::Little)
@@ -3936,9 +3981,9 @@ impl FuncEnvironment<'_> {
                         0,
                     );
                 } else if initialized {
-                    gc::write_field_at_addr(self, builder, elem_ty, elem_addr, value)?
+                    gc::write_field_at_addr(self, builder, elem_ty, elem_addr, access, value)?
                 } else {
-                    gc::init_field_at_addr(self, builder, elem_ty, elem_addr, value)?
+                    gc::init_field_at_addr(self, builder, elem_ty, elem_addr, access, value)?
                 }
             }
             _ => unreachable!(),
@@ -4558,10 +4603,19 @@ impl FuncEnvironment<'_> {
                         assert!(initialized);
                         this.translate_table_get(builder, table, src_index)?
                     }
-                    CheckedEntity::Array { initialized, .. } => {
+                    CheckedEntity::Array {
+                        initialized, ty, ..
+                    } => {
                         assert!(initialized);
                         let read_ty = src_entity.storage_type(this);
-                        gc::read_field_at_addr(this, builder, read_ty, src, None)?
+                        gc::read_field_at_addr(
+                            this,
+                            builder,
+                            read_ty,
+                            src,
+                            GcAccess::ArrayElements { ty },
+                            None,
+                        )?
                     }
                     CheckedEntity::Elem(_) => {
                         let WasmStorageType::Val(WasmValType::Ref(ty)) = write_ty else {
@@ -4600,11 +4654,14 @@ impl FuncEnvironment<'_> {
                             initialized,
                         )?;
                     }
-                    CheckedEntity::Array { initialized, .. } => {
+                    CheckedEntity::Array {
+                        initialized, ty, ..
+                    } => {
+                        let access = GcAccess::ArrayElements { ty };
                         if initialized {
-                            gc::write_field_at_addr(this, builder, write_ty, dst, val)?
+                            gc::write_field_at_addr(this, builder, write_ty, dst, access, val)?
                         } else {
-                            gc::init_field_at_addr(this, builder, write_ty, dst, val)?
+                            gc::init_field_at_addr(this, builder, write_ty, dst, access, val)?
                         }
                     }
                     CheckedEntity::Memory(_)
@@ -5288,8 +5345,9 @@ impl FuncEnvironment<'_> {
         builder: &mut FunctionBuilder<'_>,
         contobj: ir::Value,
         args: &[ir::Value],
+        arg_types: &[WasmValType],
     ) -> ir::Value {
-        stack_switching::instructions::translate_cont_bind(self, builder, contobj, args)
+        stack_switching::instructions::translate_cont_bind(self, builder, contobj, args, arg_types)
     }
 
     pub fn translate_cont_new(
@@ -5369,13 +5427,15 @@ impl FuncEnvironment<'_> {
         builder: &mut FunctionBuilder<'_>,
         tag_index: u32,
         suspend_args: &[ir::Value],
-        tag_return_types: &[ir::Type],
+        suspend_arg_types: &[WasmValType],
+        tag_return_types: &[WasmValType],
     ) -> WasmResult<Vec<ir::Value>> {
         stack_switching::instructions::translate_suspend(
             self,
             builder,
             tag_index,
             suspend_args,
+            suspend_arg_types,
             tag_return_types,
         )
     }
@@ -5387,7 +5447,8 @@ impl FuncEnvironment<'_> {
         tag_index: u32,
         contobj: ir::Value,
         switch_args: &[ir::Value],
-        return_types: &[ir::Type],
+        switch_arg_types: &[WasmValType],
+        return_types: &[WasmValType],
     ) -> WasmResult<Vec<ir::Value>> {
         stack_switching::instructions::translate_switch(
             self,
@@ -5395,6 +5456,7 @@ impl FuncEnvironment<'_> {
             tag_index,
             contobj,
             switch_args,
+            switch_arg_types,
             return_types,
         )
     }
@@ -6533,7 +6595,7 @@ impl CheckedEntity {
             CheckedEntity::Elem(_) => false,
             // Tables that are lazily initialized can't be memset because the
             // initialized bit needs to be set when storing values.
-            CheckedEntity::Table { .. } => !env.tunables.table_lazy_init,
+            CheckedEntity::Table { .. } => false,
         }
     }
 }

@@ -45,7 +45,7 @@ fn open_directory_with_truncate_is_error() {
     let mut options = p::OpenOptions::new();
     // The `maybe_dir` part of this test is gone along with the option itself.
     options.truncate(true).read(true).write(true);
-    p::create_dir(&start, Path::new("test"), &p::DirOptions::new()).unwrap();
+    p::create_dir(&start, Path::new("test")).unwrap();
     assert!(p::open(&start, Path::new("test"), &options).is_err());
 }
 
@@ -57,15 +57,13 @@ fn dir_entry_methods() {
     h::create_dir_all(&start, "a").unwrap();
     h::create(&start, "b").unwrap();
 
-    // `DirEntry::file_type` is gone; the metadata checks still cover this.
-    for file in h::read_dir(&start, ".").unwrap().map(|f| f.unwrap()) {
-        let fname = file.file_name();
+    for (fname, ty) in p::read_dir(&start).unwrap().map(|f| f.unwrap()) {
         match fname.to_str() {
             Some("a") => {
-                assert!(file.metadata().unwrap().is_dir());
+                assert!(ty.is_dir());
             }
             Some("b") => {
-                assert!(file.metadata().unwrap().file_type().is_file());
+                assert!(ty.is_file());
             }
             f => panic!("unknown file name: {f:?}"),
         }
@@ -600,10 +598,13 @@ fn file_test_directoryinfo_readdir() {
         let msg = msg_str.as_bytes();
         check!(w.write(msg));
     }
-    let files = check!(h::read_dir(&start, dir));
+    let files = {
+        let dir_handle = check!(p::open_dir(&start, dir.as_ref()));
+        check!(p::read_dir(&dir_handle))
+    };
     let mut mem = [0; 4];
     for f in files {
-        let f = f.unwrap().file_name();
+        let (f, _ty) = f.unwrap();
         {
             check!(check!(h::open(&start, &f)).read(&mut mem));
             let read_str = str::from_utf8(&mem).unwrap();
@@ -828,7 +829,7 @@ fn readlink_not_symlink() {
 
 #[cfg(not(windows))]
 #[test]
-fn read_link_contents() {
+fn read_link_relative() {
     let tmpdir = tmpdir();
     let start = h::dir_of(&tmpdir);
     let link = "link";
@@ -837,16 +838,19 @@ fn read_link_contents() {
     };
     check!(h::symlink_file(&start, &"foo", &link));
     assert_eq!(
-        check!(super::super::read_link_contents(&start, Path::new(link)))
+        check!(super::super::read_link(&start, Path::new(link)))
             .to_str()
             .unwrap(),
         "foo"
     );
 }
 
+/// Reading a symlink whose target is absolute is refused, even though the
+/// underlying `readlinkat` would succeed, to avoid leaking information about
+/// the host filesystem outside the sandbox.
 #[cfg(not(windows))]
 #[test]
-fn read_link_contents_absolute() {
+fn read_link_absolute() {
     let tmpdir = tmpdir();
     let start = h::dir_of(&tmpdir);
     let link = "link";
@@ -854,11 +858,9 @@ fn read_link_contents_absolute() {
         return;
     };
     check!(std::os::unix::fs::symlink("/foo", tmpdir.path().join(link)));
-    assert_eq!(
-        check!(super::super::read_link_contents(&start, Path::new(link)))
-            .to_str()
-            .unwrap(),
-        "/foo"
+    error_contains!(
+        super::super::read_link(&start, Path::new(link)),
+        "a path led outside of the filesystem"
     );
 }
 
@@ -1027,22 +1029,10 @@ fn mkdir_trailing_slash() {
 }
 
 #[test]
-fn dir_entry_debug() {
-    let tmpdir = tmpdir();
-    let start = h::dir_of(&tmpdir);
-    h::create(&start, "b").unwrap();
-    let mut read_dir = h::read_dir(&start, ".").unwrap();
-    let dir_entry = read_dir.next().unwrap().unwrap();
-    let actual = format!("{dir_entry:?}");
-    let expected = format!("DirEntry({:?})", dir_entry.file_name());
-    assert_eq!(actual, expected);
-}
-
-#[test]
 fn read_dir_not_found() {
     let tmpdir = tmpdir();
     let start = h::dir_of(&tmpdir);
-    let res = h::read_dir(&start, "path/that/does/not/exist");
+    let res = p::open_dir(&start, "path/that/does/not/exist".as_ref());
     assert_eq!(res.err().unwrap().kind(), ErrorKind::NotFound);
 }
 

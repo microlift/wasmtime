@@ -2384,7 +2384,9 @@ where
             | Operator::CallIndirect { .. }
             | Operator::Call { .. }
             | Operator::ReturnCall { .. }
-            | Operator::ReturnCallIndirect { .. } => self.emit_fuel_increment(),
+            | Operator::ReturnCallIndirect { .. }
+            | Operator::Throw { .. }
+            | Operator::ThrowRef => self.emit_fuel_increment(),
             _ => Ok(()),
         }
     }

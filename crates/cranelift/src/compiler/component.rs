@@ -742,111 +742,63 @@ impl<'a> TrampolineCompiler<'a> {
                     },
                 );
             }
-            Trampoline::ThreadSuspend {
-                instance,
-                cancellable,
-            } => {
+            Trampoline::ThreadSuspend { instance } => {
                 self.translate_libcall(
                     host::thread_suspend,
                     TrapSentinel::NegativeOne,
                     WasmArgs::InRegisters,
                     |me, params| {
                         params.push(me.index_value(*instance));
-                        params.push(
-                            me.builder
-                                .ins()
-                                .iconst(ir::types::I8, i64::from(*cancellable)),
-                        );
                     },
                 );
             }
-            Trampoline::ThreadYield {
-                instance,
-                cancellable,
-            } => {
+            Trampoline::ThreadYield { instance } => {
                 self.translate_libcall(
                     host::thread_yield,
                     TrapSentinel::NegativeOne,
                     WasmArgs::InRegisters,
                     |me, params| {
                         params.push(me.index_value(*instance));
-                        params.push(
-                            me.builder
-                                .ins()
-                                .iconst(ir::types::I8, i64::from(*cancellable)),
-                        );
                     },
                 );
             }
-            Trampoline::ThreadSuspendThenResume {
-                instance,
-                cancellable,
-            } => {
+            Trampoline::ThreadSuspendThenResume { instance } => {
                 self.translate_libcall(
                     host::thread_suspend_then_resume,
                     TrapSentinel::NegativeOne,
                     WasmArgs::InRegisters,
                     |me, params| {
                         params.push(me.index_value(*instance));
-                        params.push(
-                            me.builder
-                                .ins()
-                                .iconst(ir::types::I8, i64::from(*cancellable)),
-                        );
                     },
                 );
             }
-            Trampoline::ThreadYieldThenResume {
-                instance,
-                cancellable,
-            } => {
+            Trampoline::ThreadYieldThenResume { instance } => {
                 self.translate_libcall(
                     host::thread_yield_then_resume,
                     TrapSentinel::NegativeOne,
                     WasmArgs::InRegisters,
                     |me, params| {
                         params.push(me.index_value(*instance));
-                        params.push(
-                            me.builder
-                                .ins()
-                                .iconst(ir::types::I8, i64::from(*cancellable)),
-                        );
                     },
                 );
             }
-            Trampoline::ThreadSuspendThenPromote {
-                instance,
-                cancellable,
-            } => {
+            Trampoline::ThreadSuspendThenPromote { instance } => {
                 self.translate_libcall(
                     host::thread_suspend_then_promote,
                     TrapSentinel::NegativeOne,
                     WasmArgs::InRegisters,
                     |me, params| {
                         params.push(me.index_value(*instance));
-                        params.push(
-                            me.builder
-                                .ins()
-                                .iconst(ir::types::I8, i64::from(*cancellable)),
-                        );
                     },
                 );
             }
-            Trampoline::ThreadYieldThenPromote {
-                instance,
-                cancellable,
-            } => {
+            Trampoline::ThreadYieldThenPromote { instance } => {
                 self.translate_libcall(
                     host::thread_yield_then_promote,
                     TrapSentinel::NegativeOne,
                     WasmArgs::InRegisters,
                     |me, params| {
                         params.push(me.index_value(*instance));
-                        params.push(
-                            me.builder
-                                .ins()
-                                .iconst(ir::types::I8, i64::from(*cancellable)),
-                        );
                     },
                 );
             }
@@ -1189,7 +1141,7 @@ impl<'a> TrampolineCompiler<'a> {
             }
 
             if self.compiler.tunables.concurrency_support {
-                Some(self.enter_sync_call_inline(instance, def.instance))
+                Some(self.enter_sync_call_inline(def.instance))
             } else {
                 None
             }
@@ -1286,14 +1238,9 @@ impl<'a> TrampolineCompiler<'a> {
     /// otherwise do eagerly.
     fn enter_sync_call_inline(
         &mut self,
-        caller_instance: RuntimeComponentInstanceIndex,
         callee_instance: RuntimeComponentInstanceIndex,
     ) -> ir::StackSlot {
         let vmctx = self.caller_vmctx();
-        let caller_instance = self
-            .builder
-            .ins()
-            .iconst(ir::types::I32, i64::from(caller_instance.as_u32()));
         let callee_async = self.builder.ins().iconst(ir::types::I32, 0);
         let callee_instance = self
             .builder
@@ -1304,7 +1251,6 @@ impl<'a> TrampolineCompiler<'a> {
             &mut self.alias_regions,
             vmctx,
             crate::component_sync_call::EnterArgs {
-                caller_instance,
                 callee_async,
                 callee_instance,
             },

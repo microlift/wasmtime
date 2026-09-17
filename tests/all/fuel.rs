@@ -694,6 +694,58 @@ fn custom_operator_cost(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+#[wasmtime_test(wasm_features(exceptions, reference_types))]
+#[cfg_attr(miri, ignore)]
+fn exceptions_with_fuel(config: &mut Config) -> Result<()> {
+    config.consume_fuel(true);
+    let engine = Engine::new(config)?;
+    let module = Module::new(
+        &engine,
+        r#"
+        (module
+          (tag $e (param i32))
+
+          (func (export "throw") (param i32) (result i32)
+            (block $catch (result i32)
+              (try_table (result i32) (catch $e $catch)
+                local.get 0
+                if
+                  i32.const 42
+                  throw $e
+                end
+                i32.const 7)))
+
+          (func (export "throw_ref") (result i32)
+            (block $catch (result i32)
+              (try_table (result i32) (catch $e $catch)
+                (block $rethrow (result i32 exnref)
+                  (try_table (result i32 exnref) (catch_ref $e $rethrow)
+                    i32.const 42
+                    throw $e))
+                throw_ref))))
+        "#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    store.set_fuel(100)?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+
+    let throw = instance.get_typed_func::<i32, i32>(&mut store, "throw")?;
+    for (condition, result, consumed) in [(0, 7, 5), (1, 42, 6)] {
+        store.set_fuel(100)?;
+        assert_eq!(throw.call(&mut store, condition)?, result);
+        // Function entry, try_table, local.get, if, and i32.const each
+        // consume one fuel unit, as does throw when the branch is taken.
+        assert_eq!(store.get_fuel()?, 100 - consumed);
+    }
+
+    let throw_ref = instance.get_typed_func::<(), i32>(&mut store, "throw_ref")?;
+    store.set_fuel(100)?;
+    assert_eq!(throw_ref.call(&mut store, ())?, 42);
+    // Function entry, two try_tables, i32.const, throw, and throw_ref.
+    assert_eq!(store.get_fuel()?, 94);
+    Ok(())
+}
+
 #[wasmtime_test(wasm_features(bulk_memory, reference_types, gc, function_references))]
 #[cfg_attr(miri, ignore)]
 fn custom_variable_operator_cost(config: &mut Config) -> Result<()> {
