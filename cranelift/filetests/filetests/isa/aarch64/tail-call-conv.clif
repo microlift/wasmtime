@@ -389,10 +389,10 @@ block0:
 ;   udf #0 ; reloc_external Abs8 %tail_callee_stack_rets 0
 ;   udf #0
 ;   blr x0
-;   ldur x9, [sp]
-;   stur x9, [sp, #0x70]
-;   ldur x9, [sp, #8]
-;   stur x9, [sp, #0x78]
+;   ldur x8, [sp]
+;   stur x8, [sp, #0x70]
+;   ldur x8, [sp, #8]
+;   stur x8, [sp, #0x78]
 ;   ldur x28, [sp, #0x10]
 ;   ldur x27, [sp, #0x18]
 ;   ldur x26, [sp, #0x20]
@@ -403,8 +403,8 @@ block0:
 ;   ldur x22, [sp, #0x48]
 ;   ldur x23, [sp, #0x50]
 ;   ldur x24, [sp, #0x58]
-;   ldur x9, [sp, #0x60]
-;   stur x9, [sp, #0x80]
+;   ldur x8, [sp, #0x60]
+;   stur x8, [sp, #0x80]
 ;   ldur x2, [sp, #0x80]
 ;   add sp, sp, #0x90
 ;   ldp x19, x20, [sp], #0x10
@@ -673,10 +673,10 @@ block0:
 ;   udf #0
 ;   blr x0
 ;   sub sp, sp, #0x70
-;   ldur x9, [sp, #0x70]
-;   stur x9, [sp, #0xe0]
-;   ldur x9, [sp, #0x78]
-;   stur x9, [sp, #0xe8]
+;   ldur x8, [sp, #0x70]
+;   stur x8, [sp, #0xe0]
+;   ldur x8, [sp, #0x78]
+;   stur x8, [sp, #0xe8]
 ;   ldur x28, [sp, #0x80]
 ;   ldur x27, [sp, #0x88]
 ;   ldur x26, [sp, #0x90]
@@ -687,8 +687,8 @@ block0:
 ;   ldur x22, [sp, #0xb8]
 ;   ldur x23, [sp, #0xc0]
 ;   ldur x24, [sp, #0xc8]
-;   ldur x9, [sp, #0xd0]
-;   stur x9, [sp, #0xf0]
+;   ldur x8, [sp, #0xd0]
+;   stur x8, [sp, #0xf0]
 ;   ldur x2, [sp, #0xf0]
 ;   add sp, sp, #0x100
 ;   ldp x19, x20, [sp], #0x10

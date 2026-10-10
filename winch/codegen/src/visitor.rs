@@ -7,7 +7,7 @@
 use crate::abi::RetArea;
 use crate::codegen::{
     Callee, CatchInfo, CodeGen, CodeGenError, ConditionalBranch, ControlStackFrame, Emission,
-    FnCall, TryTableInfo, UnconditionalBranch, control_index,
+    FnCall, TryTableInfo, TypeConverter, UnconditionalBranch, control_index,
 };
 use crate::masm::{
     AtomicWaitKind, DivKind, Extend, ExtractLaneKind, FloatCmpKind, IntCmpKind, LoadKind,
@@ -29,8 +29,8 @@ use wasmparser::{
 };
 use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TagIndex, TypeIndex,
-    WasmCompositeInnerType, WasmHeapType, WasmValType,
+    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TagIndex, TypeConvert,
+    TypeIndex, WasmCompositeInnerType, WasmHeapType, WasmValType,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -191,6 +191,7 @@ macro_rules! def_unsupported {
     (emit LocalGet $($rest:tt)*) => {};
     (emit LocalSet $($rest:tt)*) => {};
     (emit Call $($rest:tt)*) => {};
+    (emit ReturnCall $($rest:tt)*) => {};
     (emit End $($rest:tt)*) => {};
     (emit Nop $($rest:tt)*) => {};
     (emit If $($rest:tt)*) => {};
@@ -215,6 +216,7 @@ macro_rules! def_unsupported {
     (emit Drop $($rest:tt)*) => {};
     (emit BrTable $($rest:tt)*) => {};
     (emit CallIndirect $($rest:tt)*) => {};
+    (emit ReturnCallIndirect $($rest:tt)*) => {};
     (emit TableInit $($rest:tt)*) => {};
     (emit TableCopy $($rest:tt)*) => {};
     (emit TableGet $($rest:tt)*) => {};
@@ -1695,6 +1697,19 @@ where
         Ok(())
     }
 
+    fn visit_return_call(&mut self, index: u32) -> Self::Output {
+        let callee = self.env.callee_from_index(FuncIndex::from_u32(index));
+        FnCall::emit_return::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            self.sig.params_stack_size(),
+            callee,
+        )?;
+        self.context.reachable = false;
+        Ok(())
+    }
+
     fn visit_call_indirect(&mut self, type_index: u32, table_index: u32) -> Self::Output {
         // Spill now because `emit_table_get` and the `FnCall::emit`
         // invocations will both trigger spills since they both call functions.
@@ -1724,6 +1739,38 @@ where
 
         let callee = self.env.funcref(type_index);
         FnCall::emit::<M>(&mut self.env, self.masm, &mut self.context, callee)?;
+        Ok(())
+    }
+
+    fn visit_return_call_indirect(&mut self, type_index: u32, table_index: u32) -> Self::Output {
+        // As with a normal indirect call, spill before table lookup because
+        // lazy funcref initialization can itself make a call.
+        self.context.spill(self.masm)?;
+
+        let type_index = TypeIndex::from_u32(type_index);
+        let table_index = TableIndex::from_u32(table_index);
+
+        self.emit_table_get(table_index)?;
+
+        let funcref_ptr = self
+            .context
+            .stack
+            .peek()
+            .map(|v| v.unwrap_reg())
+            .ok_or_else(|| CodeGenError::missing_values_in_stack())?;
+        self.masm
+            .trapz(funcref_ptr.into(), TRAP_INDIRECT_CALL_TO_NULL)?;
+        self.emit_typecheck_funcref(funcref_ptr.into(), type_index)?;
+
+        let callee = self.env.funcref(type_index);
+        FnCall::emit_return::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            self.sig.params_stack_size(),
+            callee,
+        )?;
+        self.context.reachable = false;
         Ok(())
     }
 
@@ -1858,6 +1905,14 @@ where
     // Record the handlers that apply to calls within this `try_table`. Their
     // landing pads are emitted when the control frame ends.
     fn visit_try_table(&mut self, try_table: TryTable) -> Self::Output {
+        // When this `try_table` is unreachable at entry, its handlers cannot run.
+        // Use a plain block to match its `end`, without registering catches.
+        // Unreachable blocks do not record the machine-stack state needed to
+        // emit landing pads.
+        if !self.context.reachable {
+            return self.visit_block(try_table.ty);
+        }
+
         let checkpoint = self.context.exception_handlers.take_checkpoint();
         let mut catches = Vec::with_capacity(try_table.catches.len());
 
@@ -1951,6 +2006,12 @@ where
             self.masm,
             &mut self.context,
         )?);
+
+        // Unreachable loops still need a control frame, but must not emit
+        // runtime-limit checks against a potentially unwound stack frame.
+        if !self.context.reachable {
+            return Ok(());
+        }
 
         self.maybe_emit_epoch_check()?;
         self.maybe_emit_fuel_check()
@@ -2206,27 +2267,12 @@ where
     }
 
     fn visit_select(&mut self) -> Self::Output {
-        let cond = self.context.pop_to_reg(self.masm, None)?;
-        let val2 = self.context.pop_to_reg(self.masm, None)?;
-        let val1 = self.context.pop_to_reg(self.masm, None)?;
-        self.masm.cmp(cond.reg, RegImm::i32(0), OperandSize::S32)?;
-        // Conditionally move val1 to val2 if the comparison is
-        // not zero.
-        self.masm.cmov(
-            writable!(val2.into()),
-            val1.into(),
-            IntCmpKind::Ne,
-            val1.ty.try_into()?,
-        )?;
-        self.context.stack.push(val2.into());
-        self.context.free_reg(val1.reg);
-        self.context.free_reg(cond);
-
-        Ok(())
+        self.emit_select(None)
     }
 
-    fn visit_typed_select(&mut self, _ty: ValType) -> Self::Output {
-        self.visit_select()
+    fn visit_typed_select(&mut self, ty: ValType) -> Self::Output {
+        let ty = TypeConverter::new(self.env.translation, self.env.types).convert_valtype(ty)?;
+        self.emit_select(Some(ty))
     }
 
     fn visit_ref_null(&mut self, hty: HeapType) -> Self::Output {

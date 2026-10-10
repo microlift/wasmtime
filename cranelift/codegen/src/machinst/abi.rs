@@ -1223,6 +1223,19 @@ fn checked_round_up(val: u32, mask: u32) -> Option<u32> {
     Some(val.checked_add(mask)? & !mask)
 }
 
+/// Returns `slot_offset + offset` as an offset into the stack slot area, if
+/// its magnitude is less than the maximum frame size. Since the whole frame is
+/// also limited to that size, adding the rest of the frame (e.g. the outgoing
+/// argument area) to such an offset can't overflow an `i32`.
+fn stackslot_area_offset<M: ABIMachineSpec>(slot_offset: u32, offset: i64) -> Option<i32> {
+    let offset = i64::from(slot_offset).checked_add(offset)?;
+    if offset.unsigned_abs() < u64::from(M::maximum_frame_size()) {
+        i32::try_from(offset).ok()
+    } else {
+        None
+    }
+}
+
 impl<M: ABIMachineSpec> Callee<M> {
     /// Create a new body ABI instance.
     pub fn new(
@@ -1264,7 +1277,17 @@ impl<M: ABIMachineSpec> Callee<M> {
             // We always at least machine-word-align slots, but also
             // satisfy the user's requested alignment.
             debug_assert!(data.align_shift < 32);
-            let align = core::cmp::max(M::word_bytes(), 1u32 << data.align_shift);
+            // The frame is only as aligned as the ABI's stack alignment, so a
+            // slot can't be more aligned than that.
+            let requested_align = 1u32 << data.align_shift;
+            if requested_align > M::stack_align(call_conv) {
+                return Err(CodegenError::Unsupported(format!(
+                    "stack slot alignment of {requested_align} bytes is larger than the \
+                     stack alignment of {} bytes",
+                    M::stack_align(call_conv)
+                )));
+            }
+            let align = core::cmp::max(M::word_bytes(), requested_align);
             let mask = align - 1;
             let start_offset = checked_round_up(unaligned_start_offset, mask)
                 .ok_or(CodegenError::ImplLimitExceeded)?;
@@ -1305,6 +1328,30 @@ impl<M: ABIMachineSpec> Callee<M> {
         // The size of the stackslots needs to be word aligned
         let stackslots_size = checked_round_up(end_offset, M::word_bytes() - 1)
             .ok_or(CodegenError::ImplLimitExceeded)?;
+
+        // The whole frame must fit in `maximum_frame_size` (checked with the
+        // final layout in `compute_frame_layout`), so reject oversized stack
+        // slots now. Also check the offsets that `stack_addr` adds to them, so
+        // that every stack slot address computed during lowering is in range.
+        if stackslots_size > M::maximum_frame_size() {
+            return Err(CodegenError::ImplLimitExceeded);
+        }
+        for block in f.layout.blocks() {
+            for inst in f.layout.block_insts(block) {
+                if let ir::InstructionData::StackAddr {
+                    stack_slot, offset, ..
+                } = f.dfg.insts[inst]
+                {
+                    let offset = i64::from(offset);
+                    if offset < 0
+                        || stackslot_area_offset::<M>(sized_stackslots[stack_slot], offset)
+                            .is_none()
+                    {
+                        return Err(CodegenError::ImplLimitExceeded);
+                    }
+                }
+            }
+        }
 
         let mut dynamic_type_sizes = HashMap::with_capacity(f.dfg.dynamic_types.len());
         for (dyn_ty, _data) in f.dfg.dynamic_types.iter() {
@@ -1878,6 +1925,12 @@ impl<M: ABIMachineSpec> Callee<M> {
             match &sigs.args(sig)[idx] {
                 &ABIArg::Slots { .. } | &ABIArg::ImplicitPtrArg { .. } => {}
                 &ABIArg::StructArg { offset, size, .. } => {
+                    // The `tail` calling convention doesn't support
+                    // struct arguments, because doing so would be
+                    // complex: the copies would go to the caller's
+                    // own incoming argument area, which may also be
+                    // where their sources are.
+                    debug_assert!(!is_tail_call);
                     let tmp = vregs.alloc_with_deferred_error(word_ty).only_reg().unwrap();
                     insts.push(M::gen_get_stack_addr(
                         stack_arg(offset),
@@ -2168,8 +2221,9 @@ impl<M: ABIMachineSpec> Callee<M> {
         // after the register allocator has run and thus cannot have register allocator-inserted
         // references to SP offsets.)
 
-        let callee_pop_size = if callee_conv == isa::CallConv::Tail {
-            // The tail calling convention has callees pop stack arguments.
+        let callee_pop_size = if matches!(callee_conv, isa::CallConv::Tail | isa::CallConv::Winch) {
+            // The tail and Winch calling conventions have callees pop stack
+            // arguments.
             stack_arg_space
         } else {
             0
@@ -2191,6 +2245,13 @@ impl<M: ABIMachineSpec> Callee<M> {
     /// Get the raw offset of a sized stackslot in the slot region.
     pub fn sized_stackslot_offset(&self, slot: StackSlot) -> u32 {
         self.sized_stackslots[slot]
+    }
+
+    /// The offset of `offset` bytes into a sized stackslot, relative to the
+    /// start of the stackslot area, if it is small enough to address directly
+    /// (see `stackslot_area_offset`).
+    pub fn sized_stackslot_area_offset(&self, slot: StackSlot, offset: i64) -> Option<i32> {
+        stackslot_area_offset::<M>(self.sized_stackslots[slot], offset)
     }
 
     /// Produce an instruction that computes a sized stackslot address.
@@ -2243,9 +2304,14 @@ impl<M: ABIMachineSpec> Callee<M> {
         function_calls: FunctionCalls,
     ) -> CodegenResult<()> {
         let bytes = M::word_bytes();
-        let total_stacksize = self.stackslots_size + bytes * spillslots as u32;
         let mask = M::stack_align(self.call_conv) - 1;
-        let total_stacksize = (total_stacksize + mask) & !mask; // 16-align the stack.
+        let total_stacksize = u32::try_from(spillslots)
+            .ok()
+            .and_then(|spillslots| spillslots.checked_mul(bytes))
+            .and_then(|spillslot_bytes| self.stackslots_size.checked_add(spillslot_bytes))
+            // Align the stack.
+            .and_then(|size| checked_round_up(size, mask))
+            .ok_or(CodegenError::ImplLimitExceeded)?;
         let frame_layout = M::compute_frame_layout(
             self.call_conv,
             &self.flags,

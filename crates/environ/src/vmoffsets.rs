@@ -48,7 +48,6 @@ macro_rules! define_vm_type_offsets {
     (@size ($p:expr) Option < VmPtr < $g:ty >>) => { u32::from($p) };
     (@size ($p:expr) AtomicUsize) => { u32::from($p) };
     (@size ($p:expr) usize) => { u32::from($p) };
-    (@size ($p:expr) * mut $g:ty) => { u32::from($p) };
     (@size ($p:expr) i64) => { 8u32 };
     (@size ($p:expr) u64) => { 8u32 };
     (@size ($p:expr) u32) => { 4u32 };
@@ -72,9 +71,13 @@ macro_rules! define_vm_type_offsets {
     (@size ($p:expr) VMStackLimits) => { u32::from(($p).vm_stack_limits().size()) };
     (@size ($p:expr) VMHostArray) => { u32::from(($p).vm_host_array().size()) };
     (@size ($p:expr) VMPayloads) => { u32::from(($p).vm_payloads().size()) };
+    (@size ($p:expr) VMAsanStackSupport) => {
+        u32::from(($p).vm_asan_stack_support().size())
+    };
     (@size ($p:expr) VMCommonStackInformation) => {
         u32::from(($p).vm_common_stack_information().size())
     };
+    (@size ($p:expr) VMGcHeader) => { u32::from(($p).vm_gc_header().size()) };
     // `VMStackChain` is a `repr(usize, C)` enum, and is not itself defined by
     // `for_each_vm_type!`.
     (@size ($p:expr) VMStackChain) => { u32::from(($p).size_of_vmstack_chain()) };
@@ -99,7 +102,6 @@ macro_rules! define_vm_type_offsets {
     (@align ($p:expr) Option < VmPtr < $g:ty >>) => { u32::from($p) };
     (@align ($p:expr) AtomicUsize) => { u32::from($p) };
     (@align ($p:expr) usize) => { u32::from($p) };
-    (@align ($p:expr) * mut $g:ty) => { u32::from($p) };
     (@align ($p:expr) i64) => { 8u32 };
     (@align ($p:expr) u64) => { 8u32 };
     (@align ($p:expr) u32) => { 4u32 };
@@ -118,9 +120,13 @@ macro_rules! define_vm_type_offsets {
     (@align ($p:expr) VMStackLimits) => { u32::from(($p).vm_stack_limits().align()) };
     (@align ($p:expr) VMHostArray) => { u32::from(($p).vm_host_array().align()) };
     (@align ($p:expr) VMPayloads) => { u32::from(($p).vm_payloads().align()) };
+    (@align ($p:expr) VMAsanStackSupport) => {
+        u32::from(($p).vm_asan_stack_support().align())
+    };
     (@align ($p:expr) VMCommonStackInformation) => {
         u32::from(($p).vm_common_stack_information().align())
     };
+    (@align ($p:expr) VMGcHeader) => { u32::from(($p).vm_gc_header().align()) };
     (@align ($p:expr) VMStackChain) => { u32::from($p) };
     (@align ($p:expr) VMStackState) => { 4u32 };
     (@align ($p:expr) VMContinuationStack) => { u32::from($p) };
@@ -885,45 +891,6 @@ macro_rules! define_vmoffsets_dynamic_offsets {
     };
 }
 for_each_vmctx_type!(define_vmoffsets_dynamic_offsets);
-
-/// Offsets for `VMGcHeader`.
-impl<P: PtrSize> VMOffsets<P> {
-    /// Return the offset for the `VMGcHeader::kind` field.
-    #[inline]
-    pub fn vm_gc_header_kind(&self) -> u32 {
-        0
-    }
-
-    /// Return the offset for the `VMGcHeader`'s reserved bits.
-    #[inline]
-    pub fn vm_gc_header_reserved_bits(&self) -> u32 {
-        // NB: The reserved bits are the unused `VMGcKind` bits.
-        self.vm_gc_header_kind()
-    }
-
-    /// Return the offset for the `VMGcHeader::ty` field.
-    #[inline]
-    pub fn vm_gc_header_ty(&self) -> u32 {
-        self.vm_gc_header_kind() + 4
-    }
-}
-
-/// Offsets for `VMDrcHeader`.
-///
-/// Should only be used when the DRC collector is enabled.
-impl<P: PtrSize> VMOffsets<P> {
-    /// Return the offset for `VMDrcHeader::ref_count`.
-    #[inline]
-    pub fn vm_drc_header_ref_count(&self) -> u32 {
-        8
-    }
-
-    /// Return the offset for `VMDrcHeader::next_over_approximated_stack_root`.
-    #[inline]
-    pub fn vm_drc_header_next_over_approximated_stack_root(&self) -> u32 {
-        self.vm_drc_header_ref_count() + 8
-    }
-}
 
 /// Magic value for core Wasm VM contexts.
 ///

@@ -1,23 +1,14 @@
 //! Filesystem utilities.
 
 #![allow(
-    trivial_numeric_casts,
-    reason = "preexisting from when cap-primitives was imported"
-)]
-#![allow(
-    unsafe_op_in_unsafe_fn,
-    reason = "preexisting from when cap-primitives was imported"
-)]
-#![allow(
     clippy::unnecessary_fallible_conversions,
-    reason = "platform-agnostic code can't always take advantage of this"
+    reason = "typedefs are platform-specific"
 )]
-#![allow(
-    clippy::allow_attributes_without_reason,
-    reason = "preexisting from when cap-primitives was imported"
-)]
+#![allow(trivial_numeric_casts, reason = "typedefs are platform-specific")]
+#![allow(clippy::useless_conversion, reason = "typedefs are platform-specific")]
 
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 use std::{fs, io};
 
 mod file_type;
@@ -42,24 +33,39 @@ mod windows;
 #[cfg(windows)]
 use self::windows as sys;
 
-#[cfg(windows)]
-use file_type::_WindowsFileTypeExt;
 use maybe_owned_file::MaybeOwnedFile;
 use open_parent::open_parent;
 use open_unchecked_error::*;
 use sys::*;
 
 pub(crate) use file_type::FileType;
-#[cfg(any(unix, target_os = "vxworks"))]
-pub(crate) use file_type::FileTypeExt;
-#[cfg(windows)]
-pub(crate) use metadata::_WindowsByHandle;
-pub(crate) use metadata::{Metadata, MetadataExt};
+pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 pub(crate) use sys::open_ambient_dir;
 pub(crate) use sys::read_dir;
 pub(crate) use sys::set_times;
 pub(crate) use sys::set_times_nofollow;
+
+/// Set the timestamps of the file or directory that `fd` itself refers to.
+pub(crate) fn set_times_on_fd(
+    fd: &fs::File,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if sys::set_times_fast(fd, atime, mtime)? {
+        return Ok(());
+    }
+
+    let mut times = fs::FileTimes::new();
+    if let Some(atime) = atime {
+        times = times.set_accessed(atime);
+    }
+    if let Some(mtime) = mtime {
+        times = times.set_modified(mtime);
+    }
+    fd.set_times(times)
+}
 
 pub(crate) fn open(start: &fs::File, path: &Path, options: &OpenOptions) -> io::Result<fs::File> {
     #[cfg(any(
@@ -275,13 +281,6 @@ fn open_dir(start: &fs::File, path: &Path) -> io::Result<fs::File> {
     open(start, path, &dir_options())
 }
 
-/// Open a directory by performing an unsandboxed `openat`-like operation.
-#[inline]
-#[allow(dead_code)]
-fn open_dir_unchecked(start: &fs::File, path: &Path) -> io::Result<fs::File> {
-    open_unchecked(start, path, &dir_options()).map_err(Into::into)
-}
-
 pub(crate) fn remove_file(start: &fs::File, path: &Path) -> io::Result<()> {
     #[cfg(target_os = "freebsd")]
     if sys::remove_file_fast(start, path)? {
@@ -308,7 +307,7 @@ pub(crate) fn stat(start: &fs::File, path: &Path, follow: FollowSymlinks) -> io:
     // Optimization: if path has exactly one component and it's not ".." or
     // anything non-normal and we're not following symlinks we can go straight
     // to `stat_unchecked`, which can be faster than various paths below.
-    if follow == FollowSymlinks::No {
+    if follow == FollowSymlinks::No && !path_requires_dir(path) {
         let mut components = path.components();
         if let Some(Component::Normal(component)) = components.next() {
             if components.next().is_none() {

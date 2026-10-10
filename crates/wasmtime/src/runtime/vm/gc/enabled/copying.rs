@@ -14,8 +14,8 @@ use super::VMArrayRef;
 use super::trace_infos::TraceInfos;
 use crate::runtime::vm::{
     ExternRefHostDataId, GarbageCollection, GcHeap, GcHeapObject, GcProgress, GcRootsIter,
-    GcRuntime, GcStoreTraceState, SendSyncUnsafeCell, TraceInfo, TypedGcRef, VMCopyingHeapData,
-    VMExternRef, VMGcHeader, VMGcRef, VMMemoryDefinition,
+    GcRuntime, GcStoreTraceState, SendSyncUnsafeCell, TraceInfo, TypedGcRef, VMCopyingHeader,
+    VMCopyingHeapData, VMExternRef, VMGcHeader, VMGcRef, VMMemoryDefinition,
 };
 use crate::{Engine, bail_bug, prelude::*};
 use core::{
@@ -46,13 +46,6 @@ unsafe impl GcRuntime for CopyingCollector {
         let heap = CopyingHeap::new()?;
         Ok(Box::new(heap) as _)
     }
-}
-
-/// The common header for all objects in the copying collector.
-#[repr(C)]
-struct VMCopyingHeader {
-    header: VMGcHeader,
-    object_size: u32,
 }
 
 // Safety: All copying collector objects have a `VMCopyingHeader`.
@@ -151,7 +144,7 @@ struct VMCopyingArrayHeader {
 unsafe impl GcHeapObject for VMCopyingArrayHeader {
     #[inline]
     fn is(header: &VMGcHeader) -> bool {
-        header.kind() == VMGcKind::ArrayRef
+        header.kind() == Some(VMGcKind::ArrayRef)
     }
 }
 
@@ -162,8 +155,9 @@ struct VMCopyingExternRef {
     /// fields aren't overwritten after copying to the new semi-space.
     header: VMCopyingHeaderAndForwardingRef,
 
-    /// The ID of this ref's data in the `ExternRefHostDataTable`.
-    host_data: ExternRefHostDataId,
+    /// The raw encoding of this ref's `ExternRefHostDataId`; the ID type does
+    /// not accept every bit pattern, and heap bytes are untrusted.
+    host_data: u32,
 
     /// Link to the next `externref` in this semi-space.
     next_extern_ref: Option<VMExternRef>,
@@ -172,7 +166,7 @@ struct VMCopyingExternRef {
 unsafe impl GcHeapObject for VMCopyingExternRef {
     #[inline]
     fn is(header: &VMGcHeader) -> bool {
-        header.kind() == VMGcKind::ExternRef
+        header.kind() == Some(VMGcKind::ExternRef)
     }
 }
 
@@ -571,8 +565,7 @@ survived collection, since the active space is the same size as the idle space",
         if self
             .index(copying_ref(&to_ref))?
             .header
-            .kind()
-            .matches(VMGcKind::ExternRef)
+            .matches_kind(VMGcKind::ExternRef)
         {
             let old_head = self.active_extern_ref_set_head.take();
             self.index_mut::<VMCopyingExternRef>(to_ref.as_typed_unchecked())?
@@ -632,7 +625,7 @@ survived collection, since the active space is the same size as the idle space",
                 let Some(ty) = ty else {
                     bail_bug!("out-of-line trace info but no type index");
                 };
-                match trace_infos.trace_info(&ty, trace_state) {
+                match trace_infos.trace_info(&ty, trace_state)? {
                     TraceInfo::Struct { gc_ref_offsets } => {
                         for &offset in gc_ref_offsets {
                             self.scan_field(object_start, offset)?;
@@ -786,7 +779,7 @@ unsafe impl GcHeap for CopyingHeap {
         // Take the old list head before borrowing self mutably through index_mut.
         let old_head = self.active_extern_ref_set_head.take();
         let externref_obj = self.index_mut::<VMCopyingExternRef>(gc_ref.as_typed_unchecked())?;
-        externref_obj.host_data = host_data;
+        externref_obj.host_data = host_data.into_raw();
         externref_obj.next_extern_ref = old_head;
         let externref = gc_ref.into_externref_unchecked();
         self.active_extern_ref_set_head = Some(externref.unchecked_copy());
@@ -795,16 +788,18 @@ unsafe impl GcHeap for CopyingHeap {
 
     fn externref_host_data(&self, externref: &VMExternRef) -> Result<ExternRefHostDataId> {
         let typed_ref = externref_to_copying(externref);
-        Ok(self.index(typed_ref)?.host_data)
+        match ExternRefHostDataId::from_raw(self.index(typed_ref)?.host_data) {
+            Some(id) => Ok(id),
+            None => bail_bug!("invalid `ExternRefHostDataId`"),
+        }
     }
 
     fn header(&self, gc_ref: &VMGcRef) -> Result<&VMGcHeader> {
         let header: &VMGcHeader = self.index(gc_ref.as_typed_unchecked())?;
 
         debug_assert!(
-            VMGcKind::try_from_u32(header.kind().as_u32()).is_some(),
-            "header: invalid VMGcKind {:#010x} at gc_ref {gc_ref:#p}",
-            header.kind().as_u32(),
+            header.kind().is_some(),
+            "header: invalid VMGcKind at gc_ref {gc_ref:#p}",
         );
 
         Ok(header)
@@ -814,9 +809,8 @@ unsafe impl GcHeap for CopyingHeap {
         let header: &mut VMGcHeader = self.index_mut(gc_ref.as_typed_unchecked())?;
 
         debug_assert!(
-            VMGcKind::try_from_u32(header.kind().as_u32()).is_some(),
-            "header_mut: invalid VMGcKind {:#010x} at gc_ref {gc_ref:#p}",
-            header.kind().as_u32(),
+            header.kind().is_some(),
+            "header_mut: invalid VMGcKind at gc_ref {gc_ref:#p}",
         );
 
         Ok(header)
@@ -1119,6 +1113,7 @@ impl CopyingCollection<'_, '_> {
     /// linked list and deallocating host data for any that were not forwarded.
     fn sweep_extern_refs(&mut self) -> Result<()> {
         log::trace!("Begin sweeping `externref`s");
+
         let mut link = self.heap.idle_extern_ref_set_head.take();
         while let Some(externref) = link {
             let gc_ref = externref.as_gc_ref();
@@ -1126,8 +1121,14 @@ impl CopyingCollection<'_, '_> {
             let header = self.heap.index(copying_ref(gc_ref))?;
             if !header.copied() {
                 let typed: &TypedGcRef<VMCopyingExternRef> = gc_ref.as_typed_unchecked();
-                let host_data_id = self.heap.index(typed)?.host_data;
-                self.trace_state.host_data_table.dealloc(host_data_id)?;
+                match ExternRefHostDataId::from_raw(self.heap.index(typed)?.host_data) {
+                    Some(id) => {
+                        self.trace_state.host_data_table.dealloc(id)?;
+                    }
+                    None => {
+                        bail_bug!("invalid `ExternRefHostDataId`");
+                    }
+                }
             }
             link = self
                 .heap

@@ -23,6 +23,7 @@ mod missing_async;
 mod nested;
 mod post_return;
 mod resources;
+mod stream_contract;
 mod stream_sync_dropped;
 mod strings;
 mod sync_call_inline;
@@ -91,8 +92,16 @@ impl ApiStyle {
     ) -> Result<()> {
         match self {
             ApiStyle::Sync => resource.resource_drop(store),
-            ApiStyle::Async | ApiStyle::AsyncNotConcurrent | ApiStyle::Concurrent => {
+            ApiStyle::Async | ApiStyle::AsyncNotConcurrent => {
                 resource.resource_drop_async(store).await
+            }
+            ApiStyle::Concurrent => {
+                store
+                    .run_concurrent(async |accessor| {
+                        resource.resource_drop_concurrent(accessor).await
+                    })
+                    .await??;
+                Ok(())
             }
         }
     }

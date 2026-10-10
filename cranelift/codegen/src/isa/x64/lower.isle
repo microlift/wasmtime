@@ -381,8 +381,10 @@
 (decl sse_and (Type Xmm XmmMem128) Xmm)
 (rule (sse_and $F32X4 x y) (x64_andps x y))
 (rule (sse_and $F64X2 x y) (x64_andpd x y))
+(rule (sse_and $F16 x y) (x64_andps x y))
 (rule (sse_and $F32 x y) (x64_andps x y))
 (rule (sse_and $F64 x y) (x64_andpd x y))
+(rule (sse_and $F128 x y) (x64_andps x y))
 (rule -1 (sse_and (multi_lane _bits _lanes) x y) (x64_pand x y))
 
 (rule 6 (lower (band ty @ (multi_lane _bits _lanes) x y))
@@ -467,12 +469,13 @@
 ;; which is generated to be N bits large. Note that if the index is larger than
 ;; the bit-width of the type then `bzhi` doesn't have the same semantics as
 ;; `ishl`, so an `and` instruction is required to mask the index to match the
-;; semantics of Cranelift's `ishl`.
+;; semantics of Cranelift's `ishl`. The index may be an `i128`; only its low 64
+;; bits matter, since it is masked to the type's width anyway.
 
 (rule 16 (lower (band (ty_32_or_64 ty) x y))
          (if-let true (has_bmi2))
          (if-let (ishl _ (u64_from_iconst 1) index) (val_minus_one y))
-         (x64_bzhi ty x (x64_and ty index (RegMemImm.Imm (u32_wrapping_sub (ty_bits ty) 1)))))
+         (x64_bzhi ty x (x64_and ty (lo_gpr index) (RegMemImm.Imm (u32_wrapping_sub (ty_bits ty) 1)))))
 
 ;;;; Rules for `bor` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -508,8 +511,10 @@
 (decl sse_or (Type Xmm XmmMem128) Xmm)
 (rule (sse_or $F32X4 x y) (x64_orps x y))
 (rule (sse_or $F64X2 x y) (x64_orpd x y))
+(rule (sse_or $F16 x y) (x64_orps x y))
 (rule (sse_or $F32 x y) (x64_orps x y))
 (rule (sse_or $F64 x y) (x64_orpd x y))
+(rule (sse_or $F128 x y) (x64_orps x y))
 (rule -1 (sse_or (multi_lane _bits _lanes) x y) (x64_por x y))
 
 (rule 6 (lower (bor ty @ (multi_lane _bits _lanes) x y))
@@ -1798,6 +1803,15 @@
 
 (rule -1 (lower (smax (fits_in_64 ty) x y))
       (cmp_and_choose ty (CC.NL) x y))
+
+(rule 3 (lower (umin $I128 x y))
+      (lower_select (emit_cmp (IntCC.UnsignedLessThan) x y) x y))
+(rule 3 (lower (umax $I128 x y))
+      (lower_select (emit_cmp (IntCC.UnsignedGreaterThan) x y) x y))
+(rule 3 (lower (smin $I128 x y))
+      (lower_select (emit_cmp (IntCC.SignedLessThan) x y) x y))
+(rule 3 (lower (smax $I128 x y))
+      (lower_select (emit_cmp (IntCC.SignedGreaterThan) x y) x y))
 
 ;; SSE helpers for determining if single-instruction lowerings are available.
 
@@ -4354,8 +4368,10 @@
 ;; Helper for the `ceil`/`floor`/`nearest`/`trunc` instructions ;;;;;;;;;;;;;;;;
 
 ;; Emits either a `round{ss,sd,ps,pd}` instruction, as appropriate, or generates
-;; the appropriate libcall and sequence to call that.
-(decl x64_round (Type Value RoundImm) Xmm)
+;; the appropriate libcall and sequence to call that. Partial: there's no
+;; lowering for other types (e.g. `f16` and `f128`), which are then rejected as
+;; unsupported.
+(decl partial x64_round (Type Value RoundImm) Xmm)
 (rule (x64_round $F32   a imm) (x64_round_f32   a imm))
 (rule (x64_round $F64   a imm) (x64_round_f64   a imm))
 (rule (x64_round $F32X4 a imm) (x64_round_f32x4 a imm))

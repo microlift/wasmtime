@@ -1,6 +1,6 @@
 use crate::filesystem::primitives::unix::{compute_oflags, to_timespec};
 use crate::filesystem::primitives::{
-    FollowSymlinks, ImplMetadataExt, Metadata, OpenOptions, OpenOptionsExt, errors, open,
+    FollowSymlinks, Metadata, OpenOptions, OpenOptionsExt, errors, open,
 };
 use rustix::fs::{
     AtFlags, Mode, OFlags, RawMode, ResolveFlags, Timestamps, openat2, statat, utimensat,
@@ -162,7 +162,7 @@ pub(crate) fn stat_fast(
             // If `fstat` with `O_PATH` isn't supported, use `statat` with
             // `AT_EMPTY_PATH`.
             Ok(Some(
-                statat(file, "", AtFlags::EMPTY_PATH).map(ImplMetadataExt::from_rustix)?,
+                statat(file, "", AtFlags::EMPTY_PATH).map(Metadata::Stat)?,
             ))
         }
         Err(err) => match Errno::from_io_error(&err) {
@@ -172,6 +172,25 @@ pub(crate) fn stat_fast(
             _ => Err(err),
         },
     }
+}
+
+/// Set the timestamps of the file or directory that `fd` itself refers to.
+///
+/// `futimens` fails with `EBADF` when `fd` was opened with `O_PATH`, which is
+/// how preopened directories are held open (see `dir_utils::target_o_path`).
+/// An empty path with `AT_EMPTY_PATH` acts on `fd` itself and is allowed for
+/// `O_PATH` descriptors.
+pub(crate) fn set_times_fast(
+    fd: &fs::File,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> io::Result<bool> {
+    let times = Timestamps {
+        last_access: to_timespec(atime)?,
+        last_modification: to_timespec(mtime)?,
+    };
+    utimensat(fd, "", &times, AtFlags::EMPTY_PATH)?;
+    Ok(true)
 }
 
 pub(crate) fn set_times_fallback(

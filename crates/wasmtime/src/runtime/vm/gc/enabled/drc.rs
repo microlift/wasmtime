@@ -53,7 +53,7 @@ use crate::runtime::vm::{
     GcRuntime, GcStoreTraceState, SendSyncUnsafeCell, TraceInfo, TypedGcRef, VMExternRef,
     VMGcHeader, VMGcObjectData, VMGcRef,
 };
-use crate::vm::{VMDrcHeapData, VMMemoryDefinition};
+use crate::vm::{VMDrcHeader, VMDrcHeapData, VMMemoryDefinition};
 use crate::{Engine, Trap, bail_bug, prelude::*};
 use core::sync::atomic::AtomicUsize;
 use core::{
@@ -305,7 +305,12 @@ impl DrcHeap {
             Some(allocs) => allocs,
             None => bail_bug!("allocs missing during tracing"),
         };
-        let mut undo = Undo::new((self, allocs), |(this, allocs)| {
+        let mut undo = Undo::new((self, allocs), |(this, mut allocs)| {
+            // Unwinding out of a collection leaves these populated, so we must
+            // restore the invariant that they are empty between collections.
+            allocs.large_array_dec_ref_stack.clear();
+            allocs.to_dealloc.clear();
+
             debug_assert!(this.tracing_allocs.is_none());
             this.tracing_allocs = Some(allocs);
         });
@@ -342,7 +347,7 @@ impl DrcHeap {
 
                 // Trace: enqueue child GC refs for dec-ref'ing.
                 if let Some(ty) = ty {
-                    match this.trace_infos.trace_info(&ty, trace_state) {
+                    match this.trace_infos.trace_info(&ty, trace_state)? {
                         TraceInfo::Struct { gc_ref_offsets } => {
                             stack.reserve(gc_ref_offsets.len());
                             let data = this.gc_object_data(&gc_ref)?;
@@ -387,12 +392,16 @@ impl DrcHeap {
                     // Handle `externref` host data. Only `externref`s have host
                     // data, and `ty` is `None` only for `externref`s, so we skip
                     // this for `struct` and `array` objects entirely.
-                    debug_assert!(drc_header.header.kind().matches(VMGcKind::ExternRef));
+                    debug_assert!(drc_header.header.matches_kind(VMGcKind::ExternRef));
                     let externref = match gc_ref.as_typed::<VMDrcExternRef>(this) {
                         Some(r) => r,
                         None => bail_bug!("expected externref"),
                     };
-                    let host_data_id = this.index(externref)?.host_data;
+                    let host_data_id =
+                        match ExternRefHostDataId::from_raw(this.index(externref)?.host_data) {
+                            Some(id) => id,
+                            None => bail_bug!("invalid `ExternRefHostDataId`"),
+                        };
                     trace_state.host_data_table.dealloc(host_data_id)?;
                 }
 
@@ -474,10 +483,9 @@ impl DrcHeap {
 
             // Each entry must have a valid `VMGcKind`.
             let header = self.header(&gc_ref)?;
-            let kind = header.kind().as_u32();
             assert!(
-                VMGcKind::try_from_u32(kind).is_some(),
-                "over-approx list: entry at heap index {idx} has invalid VMGcKind {kind:#034b}",
+                header.kind().is_some(),
+                "over-approx list: entry at heap index {idx} has an invalid VMGcKind",
             );
 
             // Each entry must have its in-list bit set.
@@ -727,19 +735,6 @@ fn externref_to_drc(externref: &VMExternRef) -> &TypedGcRef<VMDrcExternRef> {
     gc_ref.as_typed_unchecked()
 }
 
-/// The common header for all objects in the DRC collector.
-///
-/// This adds a ref count on top collector-agnostic `VMGcHeader`.
-///
-/// This is accessed by JIT code.
-#[repr(C)]
-struct VMDrcHeader {
-    header: VMGcHeader,
-    ref_count: u64,
-    next_over_approximated_stack_root: Option<VMGcRef>,
-    object_size: u32,
-}
-
 unsafe impl GcHeapObject for VMDrcHeader {
     #[inline]
     fn is(_header: &VMGcHeader) -> bool {
@@ -852,7 +847,7 @@ struct VMDrcArrayHeader {
 unsafe impl GcHeapObject for VMDrcArrayHeader {
     #[inline]
     fn is(header: &VMGcHeader) -> bool {
-        header.kind() == VMGcKind::ArrayRef
+        header.kind() == Some(VMGcKind::ArrayRef)
     }
 }
 
@@ -860,13 +855,15 @@ unsafe impl GcHeapObject for VMDrcArrayHeader {
 #[repr(C)]
 struct VMDrcExternRef {
     header: VMDrcHeader,
-    host_data: ExternRefHostDataId,
+    // The raw encoding of an `ExternRefHostDataId`; the ID type does not accept
+    // every bit pattern, and heap bytes are untrusted.
+    host_data: u32,
 }
 
 unsafe impl GcHeapObject for VMDrcExternRef {
     #[inline]
     fn is(header: &VMGcHeader) -> bool {
-        header.kind() == VMGcKind::ExternRef
+        header.kind() == Some(VMGcKind::ExternRef)
     }
 }
 
@@ -925,9 +922,12 @@ unsafe impl GcHeap for DrcHeap {
 
         debug_assert!(tracing_allocs.is_some());
         if let Some(allocs) = tracing_allocs {
+            // Clear, rather than assert empty: an interrupted collection leaves
+            // entries behind, and this runs while the store is being dropped,
+            // where a panic would abort the process.
             allocs.dec_ref_stack.clear();
-            debug_assert!(allocs.large_array_dec_ref_stack.is_empty());
-            debug_assert!(allocs.to_dealloc.is_empty());
+            allocs.large_array_dec_ref_stack.clear();
+            allocs.to_dealloc.clear();
         }
 
         memory.take().unwrap()
@@ -1026,22 +1026,24 @@ unsafe impl GcHeap for DrcHeap {
                 Ok(gc_ref) => gc_ref,
             };
         self.index_mut::<VMDrcExternRef>(gc_ref.as_typed_unchecked())?
-            .host_data = host_data;
+            .host_data = host_data.into_raw();
         Ok(Ok(gc_ref.into_externref_unchecked()))
     }
 
     fn externref_host_data(&self, externref: &VMExternRef) -> Result<ExternRefHostDataId> {
         let typed_ref = externref_to_drc(externref);
-        Ok(self.index(typed_ref)?.host_data)
+        match ExternRefHostDataId::from_raw(self.index(typed_ref)?.host_data) {
+            Some(id) => Ok(id),
+            None => bail_bug!("invalid `ExternRefHostDataId`"),
+        }
     }
 
     fn header(&self, gc_ref: &VMGcRef) -> Result<&VMGcHeader> {
         let header: &VMGcHeader = self.index(gc_ref.as_typed_unchecked())?;
 
         debug_assert!(
-            VMGcKind::try_from_u32(header.kind().as_u32()).is_some(),
-            "header: invalid VMGcKind {:#010x} at gc_ref {gc_ref:#p}",
-            header.kind().as_u32(),
+            header.kind().is_some(),
+            "header: invalid VMGcKind at gc_ref {gc_ref:#p}",
         );
 
         Ok(header)
@@ -1051,9 +1053,8 @@ unsafe impl GcHeap for DrcHeap {
         let header: &mut VMGcHeader = self.index_mut(gc_ref.as_typed_unchecked())?;
 
         debug_assert!(
-            VMGcKind::try_from_u32(header.kind().as_u32()).is_some(),
-            "header_mut: invalid VMGcKind {:#010x} at gc_ref {gc_ref:#p}",
-            header.kind().as_u32(),
+            header.kind().is_some(),
+            "header_mut: invalid VMGcKind at gc_ref {gc_ref:#p}",
         );
 
         Ok(header)
@@ -1324,62 +1325,12 @@ impl<T> DerefMut for DebugOnly<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wasmtime_environ::HostPtr;
-
-    #[test]
-    fn vm_drc_header_size_align() {
-        assert_eq!(
-            (wasmtime_environ::drc::HEADER_SIZE as usize),
-            core::mem::size_of::<VMDrcHeader>()
-        );
-        assert_eq!(
-            (wasmtime_environ::drc::HEADER_ALIGN as usize),
-            core::mem::align_of::<VMDrcHeader>()
-        );
-    }
 
     #[test]
     fn vm_drc_array_header_length_offset() {
         assert_eq!(
             wasmtime_environ::drc::ARRAY_LENGTH_OFFSET,
             u32::try_from(core::mem::offset_of!(VMDrcArrayHeader, length)).unwrap(),
-        );
-    }
-
-    #[test]
-    fn ref_count_is_at_correct_offset() {
-        let extern_data = VMDrcHeader {
-            header: VMGcHeader::externref(),
-            ref_count: 0,
-            next_over_approximated_stack_root: None,
-            object_size: 0,
-        };
-
-        let extern_data_ptr = &extern_data as *const _;
-        let ref_count_ptr = &extern_data.ref_count as *const _;
-
-        let actual_offset = (ref_count_ptr as usize) - (extern_data_ptr as usize);
-
-        let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: HostPtr,
-            num_imported_functions: 0,
-            num_imported_tables: 0,
-            num_imported_memories: 0,
-            num_imported_globals: 0,
-            num_imported_tags: 0,
-            num_defined_tables: 0,
-            num_defined_memories: 0,
-            num_owned_memories: 0,
-            num_defined_globals: 0,
-            num_defined_tags: 0,
-            num_escaped_funcs: 0,
-            num_runtime_data: 0,
-            has_startup_func: false,
-        });
-
-        assert_eq!(
-            offsets.vm_drc_header_ref_count(),
-            u32::try_from(actual_offset).unwrap(),
         );
     }
 }

@@ -10,38 +10,7 @@ use wasmtime_core::truncate::{truncate_i32_to_i8, truncate_i32_to_i16};
 use wasmtime_environ::packed_option::ReservedValue;
 use wasmtime_environ::{VMGcKind, VMSharedTypeIndex};
 
-/// The common header for all objects allocated in a GC heap.
-///
-/// This header is shared across all collectors, although particular collectors
-/// may always add their own trailing fields to this header for all of their own
-/// GC objects.
-///
-/// This is a bit-packed structure that logically has the following fields:
-///
-/// ```ignore
-/// struct VMGcHeader {
-///     // Highest 5 bits.
-///     kind: VMGcKind,
-///
-///     // 27 bits available for the `GcRuntime` to make use of however it sees fit.
-///     reserved: u27,
-///
-///     // The `VMSharedTypeIndex` for this GC object, if it isn't an
-///     // `externref` (or an `externref` re-wrapped as an `anyref`). `None` is
-///     // represented with `VMSharedTypeIndex::reserved_value()`.
-///     ty: Option<VMSharedTypeIndex>,
-/// }
-/// ```
-#[repr(C, align(8))]
-#[derive(Debug, Clone, Copy)]
-pub struct VMGcHeader {
-    /// The object's `VMGcKind` and 27 bits of space reserved for however the GC
-    /// sees fit to use it.
-    kind: u32,
-
-    /// The object's type index.
-    ty: VMSharedTypeIndex,
-}
+pub use crate::runtime::vm::vmcontext::VMGcHeader;
 
 unsafe impl GcHeapObject for VMGcHeader {
     #[inline]
@@ -72,8 +41,19 @@ impl VMGcHeader {
     }
 
     /// Get the kind of GC object that this is.
-    pub fn kind(&self) -> VMGcKind {
+    ///
+    /// Returns `None` if this header does not name a valid kind, since headers
+    /// come out of the untrusted GC heap.
+    pub fn kind(&self) -> Option<VMGcKind> {
         VMGcKind::from_high_bits_of_u32(self.kind)
+    }
+
+    /// Is this object's kind valid and a subtype of `kind`?
+    ///
+    /// False for a header whose kind bits do not name a valid kind, since
+    /// headers come out of the untrusted GC heap.
+    pub fn matches_kind(&self, kind: VMGcKind) -> bool {
+        self.kind().is_some_and(|k| k.matches(kind))
     }
 
     /// Get the reserved 26 bits in this header.
@@ -412,7 +392,7 @@ impl VMGcRef {
     #[inline]
     pub fn is_extern_ref(&self, gc_heap: &(impl GcHeap + ?Sized)) -> bool {
         self.gc_header(gc_heap)
-            .map_or(false, |h| h.kind().matches(VMGcKind::ExternRef))
+            .map_or(false, |h| h.matches_kind(VMGcKind::ExternRef))
     }
 
     /// Is this `VMGcRef` an `anyref`?
@@ -421,7 +401,7 @@ impl VMGcRef {
         self.is_i31()
             || self
                 .gc_header(gc_heap)
-                .map_or(false, |h| h.kind().matches(VMGcKind::AnyRef))
+                .map_or(false, |h| h.matches_kind(VMGcKind::AnyRef))
     }
 
     pub fn read_val(
@@ -454,7 +434,10 @@ impl VMGcRef {
                 }
                 HeapTopType::Func => {
                     let func_ref_id = data.read_u32(offset)?;
-                    let func_ref_id = FuncRefTableId::from_raw(func_ref_id);
+                    let func_ref_id = match FuncRefTableId::from_raw(func_ref_id) {
+                        Some(id) => id,
+                        None => bail_bug!("bad FuncRefTableId"),
+                    };
                     let func_ref = store
                         .unwrap_gc_store()
                         .func_ref_table
@@ -708,23 +691,23 @@ mod tests {
         let mut header = VMGcHeader::from_kind_and_index(kind, ty);
 
         assert_eq!(header.reserved_u26(), 0);
-        assert_eq!(header.kind(), kind);
+        assert_eq!(header.kind(), Some(kind));
         assert_eq!(header.ty(), Some(ty));
 
         header.set_reserved_u26(36);
         assert_eq!(header.reserved_u26(), 36);
-        assert_eq!(header.kind(), kind);
+        assert_eq!(header.kind(), Some(kind));
         assert_eq!(header.ty(), Some(ty));
 
         let max = (1 << 26) - 1;
         header.set_reserved_u26(max);
         assert_eq!(header.reserved_u26(), max);
-        assert_eq!(header.kind(), kind);
+        assert_eq!(header.kind(), Some(kind));
         assert_eq!(header.ty(), Some(ty));
 
         header.set_reserved_u26(0);
         assert_eq!(header.reserved_u26(), 0);
-        assert_eq!(header.kind(), kind);
+        assert_eq!(header.kind(), Some(kind));
         assert_eq!(header.ty(), Some(ty));
 
         let result = std::panic::catch_unwind(move || header.set_reserved_u26(max + 1));
