@@ -99,7 +99,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         mut args: ArgsAccumulator,
     ) -> CodegenResult<(u32, Option<usize>)> {
         let is_fastcall = call_conv == CallConv::WindowsFastcall;
-        let is_tail = call_conv == CallConv::Tail;
+        let is_tail = call_conv.is_tail();
 
         let mut next_gpr = 0;
         let mut next_vreg = 0;
@@ -414,7 +414,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         next_stack = align_to(next_stack, 16);
 
         if args_or_rets == ArgsOrRets::Args
-            && matches!(call_conv, CallConv::Tail | CallConv::Winch)
+            && (call_conv.is_tail() || call_conv == CallConv::Winch)
             && next_stack > u32::from(u16::MAX)
         {
             return Err(crate::CodegenError::ImplLimitExceeded);
@@ -608,7 +608,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     ) -> SmallInstVec<Self::I> {
         // Emit return instruction.
         let stack_bytes_to_pop = match call_conv {
-            CallConv::Tail => frame_layout.tail_args_size,
+            CallConv::Tail | CallConv::TailPreserveNone => frame_layout.tail_args_size,
             CallConv::Winch => frame_layout.incoming_args_size,
             _ => 0,
         };
@@ -914,6 +914,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             // Wasmtime).
             (isa::CallConv::PreserveAll, true) => ALL_CLOBBERS,
             (isa::CallConv::Winch, _) => ALL_CLOBBERS,
+            (isa::CallConv::TailPreserveNone, _) => ALL_CLOBBERS,
             (isa::CallConv::SystemV, _) => SYSV_CLOBBERS,
             (isa::CallConv::WindowsFastcall, false) => WINDOWS_CLOBBERS,
             (isa::CallConv::PreserveAll, _) => NO_CLOBBERS,
@@ -945,9 +946,9 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         debug_assert!(tail_args_size >= incoming_args_size);
 
         let mut regs: Vec<Writable<RealReg>> = match call_conv {
-            // The `winch` calling convention doesn't have any callee-save
-            // registers.
-            CallConv::Winch => vec![],
+            // The `winch` and `tail_preserve_none` calling conventions don't
+            // have any callee-save registers.
+            CallConv::Winch | CallConv::TailPreserveNone => vec![],
             CallConv::Fast | CallConv::SystemV | CallConv::Tail => regs
                 .iter()
                 .cloned()
@@ -1089,7 +1090,7 @@ fn get_intreg_for_retval(
     is_last: bool,
 ) -> Option<Reg> {
     match call_conv {
-        CallConv::Tail => match intreg_idx {
+        CallConv::Tail | CallConv::TailPreserveNone => match intreg_idx {
             0 => Some(regs::rax()),
             1 => Some(regs::rcx()),
             2 => Some(regs::rdx()),
@@ -1123,7 +1124,7 @@ fn get_intreg_for_retval(
 
 fn get_fltreg_for_retval(call_conv: CallConv, fltreg_idx: usize, is_last: bool) -> Option<Reg> {
     match call_conv {
-        CallConv::Tail => match fltreg_idx {
+        CallConv::Tail | CallConv::TailPreserveNone => match fltreg_idx {
             0 => Some(regs::xmm0()),
             1 => Some(regs::xmm1()),
             2 => Some(regs::xmm2()),

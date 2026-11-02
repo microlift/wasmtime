@@ -416,7 +416,7 @@ where
         let mut insts = SmallVec::new();
 
         // Handle final stack adjustments for the tail-call ABI.
-        if call_conv == isa::CallConv::Tail && frame_layout.tail_args_size > 0 {
+        if call_conv.is_tail() && frame_layout.tail_args_size > 0 {
             insts.extend(Self::gen_sp_reg_adjust(
                 frame_layout.tail_args_size.try_into().unwrap(),
             ));
@@ -579,7 +579,8 @@ where
             | isa::CallConv::WindowsFastcall
             | isa::CallConv::AppleAarch64
             | isa::CallConv::Probestack
-            | isa::CallConv::Winch => &[],
+            | isa::CallConv::Winch
+            | isa::CallConv::TailPreserveNone => &[],
         }
     }
 }

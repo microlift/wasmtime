@@ -1253,7 +1253,7 @@ impl<M: ABIMachineSpec> Callee<M> {
         // Only these calling conventions are supported.
         debug_assert!(
             call_conv == isa::CallConv::SystemV
-                || call_conv == isa::CallConv::Tail
+                || call_conv.is_tail()
                 || call_conv == isa::CallConv::Fast
                 || call_conv == isa::CallConv::WindowsFastcall
                 || call_conv == isa::CallConv::AppleAarch64
@@ -1892,9 +1892,8 @@ impl<M: ABIMachineSpec> Callee<M> {
         let word_bits = M::word_bits() as usize;
 
         if is_tail_call {
-            debug_assert_eq!(
-                self.call_conv,
-                isa::CallConv::Tail,
+            debug_assert!(
+                self.call_conv.is_tail(),
                 "Can only do `return_call`s from within a `tail` calling convention function"
             );
         }
@@ -2221,7 +2220,7 @@ impl<M: ABIMachineSpec> Callee<M> {
         // after the register allocator has run and thus cannot have register allocator-inserted
         // references to SP offsets.)
 
-        let callee_pop_size = if matches!(callee_conv, isa::CallConv::Tail | isa::CallConv::Winch) {
+        let callee_pop_size = if callee_conv.is_tail() || callee_conv == isa::CallConv::Winch {
             // The tail and Winch calling conventions have callees pop stack
             // arguments.
             stack_arg_space

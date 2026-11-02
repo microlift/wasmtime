@@ -2087,7 +2087,7 @@ impl<'a> Verifier<'a> {
                     ))?;
                 }
             }
-            CallConv::Tail => {
+            CallConv::Tail | CallConv::TailPreserveNone => {
                 if sig
                     .params
                     .iter()

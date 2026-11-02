@@ -181,7 +181,7 @@ fn get_intreg_for_arg(call_conv: isa::CallConv, idx: usize) -> Option<Reg> {
         2 => Some(regs::gpr(4)),
         3 => Some(regs::gpr(5)),
         4 => Some(regs::gpr(6)),
-        5 if call_conv == isa::CallConv::Tail => Some(regs::gpr(7)),
+        5 if call_conv.is_tail() => Some(regs::gpr(7)),
         _ => None,
     }
 }
@@ -217,8 +217,8 @@ fn get_intreg_for_ret(call_conv: isa::CallConv, idx: usize) -> Option<Reg> {
         1 => Some(regs::gpr(3)),
         2 => Some(regs::gpr(4)),
         3 => Some(regs::gpr(5)),
-        4 if call_conv == isa::CallConv::Tail => Some(regs::gpr(6)),
-        5 if call_conv == isa::CallConv::Tail => Some(regs::gpr(7)),
+        4 if call_conv.is_tail() => Some(regs::gpr(6)),
+        5 if call_conv.is_tail() => Some(regs::gpr(7)),
         _ => None,
     }
 }
@@ -268,7 +268,7 @@ impl From<StackAMode> for MemArg {
 impl From<isa::CallConv> for LaneOrder {
     fn from(call_conv: isa::CallConv) -> Self {
         match call_conv {
-            isa::CallConv::Tail => LaneOrder::LittleEndian,
+            isa::CallConv::Tail | isa::CallConv::TailPreserveNone => LaneOrder::LittleEndian,
             _ => LaneOrder::BigEndian,
         }
     }
@@ -468,7 +468,7 @@ impl ABIMachineSpec for S390xMachineDeps {
         // Include the size of the register area in the argument area size to
         // match common code expectation that the return buffer resides immediately
         // above the argument area.
-        if call_conv == isa::CallConv::Tail && args_or_rets == ArgsOrRets::Args && next_stack != 0 {
+        if call_conv.is_tail() && args_or_rets == ArgsOrRets::Args && next_stack != 0 {
             next_stack += REG_SAVE_AREA_SIZE;
         }
 
@@ -704,7 +704,7 @@ impl ABIMachineSpec for S390xMachineDeps {
 
         // With the tail call convention, the caller already allocated the
         // part of our stack frame that contains incoming arguments.
-        let incoming_tail_args_size = if call_conv == isa::CallConv::Tail {
+        let incoming_tail_args_size = if call_conv.is_tail() {
             frame_layout.incoming_args_size
         } else {
             0
@@ -905,7 +905,7 @@ impl ABIMachineSpec for S390xMachineDeps {
 
     fn get_machine_env(_flags: &settings::Flags, call_conv: isa::CallConv) -> &MachineEnv {
         match call_conv {
-            isa::CallConv::Tail => {
+            isa::CallConv::Tail | isa::CallConv::TailPreserveNone => {
                 static TAIL_MACHINE_ENV: MachineEnv = tail_create_machine_env();
                 &TAIL_MACHINE_ENV
             }
@@ -928,7 +928,7 @@ impl ABIMachineSpec for S390xMachineDeps {
             // register restores" for this ABI (so as to work with
             // Wasmtime).
             isa::CallConv::PreserveAll if is_exception => ALL_CLOBBERS,
-            isa::CallConv::Tail => TAIL_CLOBBERS,
+            isa::CallConv::Tail | isa::CallConv::TailPreserveNone => TAIL_CLOBBERS,
             isa::CallConv::PreserveAll => NO_CLOBBERS,
             _ => SYSV_CLOBBERS,
         }
@@ -1020,7 +1020,7 @@ impl ABIMachineSpec for S390xMachineDeps {
         // common code still gets the total size of this stack frame correct,
         // we add the (incoming and outgoing) taill-call argument size to the
         // "clobber" size.
-        if call_conv == isa::CallConv::Tail {
+        if call_conv.is_tail() {
             clobber_size += tail_args_size;
         }
 
@@ -1163,7 +1163,7 @@ impl S390xMachineDeps {
 
 fn is_reg_saved_in_prologue(call_conv: isa::CallConv, r: RealReg) -> bool {
     match (call_conv, r.class()) {
-        (isa::CallConv::Tail, RegClass::Int) => {
+        (isa::CallConv::Tail | isa::CallConv::TailPreserveNone, RegClass::Int) => {
             // r8 - r14 inclusive are callee-saves.
             r.hw_enc() >= 8 && r.hw_enc() <= 14
         }
@@ -1228,7 +1228,7 @@ fn gen_restore_gprs(
         + frame_layout.clobber_size as i32
         + frame_layout.fixed_frame_storage_size as i32;
     let implicit_sp_restore = callee_pop_size == 0
-        && (call_conv != isa::CallConv::Tail || frame_layout.incoming_args_size == 0)
+        && (!call_conv.is_tail() || frame_layout.incoming_args_size == 0)
         && clobbered_gpr.map_or(false, |(first, _)| {
             SImm20::maybe_from_i64(8 * first as i64 + stack_size as i64).is_some()
         });

@@ -60,6 +60,13 @@ pub enum CallConv {
     /// respective platform. It does not support tail-calls. It also
     /// does not support return values.
     PreserveAll,
+    /// `tail` whose callees save no registers: every call clobbers everything.
+    ///
+    /// For chains of functions that only tail-call each other and return to one
+    /// caller of another convention, which saves what it needs once instead of
+    /// every link in the chain saving it again. Supported on x86-64 and aarch64;
+    /// elsewhere it is `tail`. No exceptions.
+    TailPreserveNone,
 }
 
 impl CallConv {
@@ -90,10 +97,12 @@ impl CallConv {
 
     /// Does this calling convention support tail calls?
     pub fn supports_tail_calls(&self) -> bool {
-        match self {
-            CallConv::Tail => true,
-            _ => false,
-        }
+        self.is_tail()
+    }
+
+    /// Is this `tail` or a variant of it, sharing its argument and stack rules?
+    pub fn is_tail(&self) -> bool {
+        matches!(self, CallConv::Tail | CallConv::TailPreserveNone)
     }
 
     /// Does this calling convention support exceptions?
@@ -144,6 +153,7 @@ impl fmt::Display for CallConv {
             Self::Probestack => "probestack",
             Self::Winch => "winch",
             Self::PreserveAll => "preserve_all",
+            Self::TailPreserveNone => "tail_preserve_none",
         })
     }
 }
@@ -160,6 +170,7 @@ impl str::FromStr for CallConv {
             "probestack" => Ok(Self::Probestack),
             "winch" => Ok(Self::Winch),
             "preserve_all" => Ok(Self::PreserveAll),
+            "tail_preserve_none" => Ok(Self::TailPreserveNone),
             _ => Err(()),
         }
     }

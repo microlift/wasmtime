@@ -1,7 +1,6 @@
 //! S390x ISA: binary code emission.
 
 use crate::ir::{self, LibCall, MemFlagsData, TrapCode};
-use crate::isa::CallConv;
 use crate::isa::s390x::abi::REG_SAVE_AREA_SIZE;
 use crate::isa::s390x::inst::*;
 use crate::isa::s390x::settings as s390x_settings;
@@ -1409,7 +1408,7 @@ pub struct EmitState {
 
 impl MachInstEmitState<Inst> for EmitState {
     fn new(abi: &Callee<S390xMachineDeps>, ctrl_plane: ControlPlane) -> Self {
-        let incoming_args_size = if abi.call_conv() == CallConv::Tail {
+        let incoming_args_size = if abi.call_conv().is_tail() {
             0
         } else {
             abi.frame_layout().incoming_args_size

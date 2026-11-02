@@ -397,7 +397,7 @@ impl ABIMachineSpec for Riscv64MachineDeps {
             insts.extend(Self::gen_sp_reg_adjust(16));
         }
 
-        if call_conv == isa::CallConv::Tail && frame_layout.tail_args_size > 0 {
+        if call_conv.is_tail() && frame_layout.tail_args_size > 0 {
             insts.extend(Self::gen_sp_reg_adjust(
                 frame_layout.tail_args_size.try_into().unwrap(),
             ));

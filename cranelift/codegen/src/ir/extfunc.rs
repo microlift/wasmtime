@@ -397,6 +397,7 @@ mod tests {
             CallConv::Fast,
             CallConv::PreserveAll,
             CallConv::Tail,
+            CallConv::TailPreserveNone,
             CallConv::SystemV,
             CallConv::WindowsFastcall,
         ] {

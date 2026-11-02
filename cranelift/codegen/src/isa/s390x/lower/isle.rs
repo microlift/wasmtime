@@ -19,7 +19,6 @@ use crate::{
         AtomicRmwOp, BlockCall, Endianness, Inst, InstructionData, KnownSymbol, MemFlagsData,
         Opcode, TrapCode, Value, ValueList, condcodes::*, immediates::*, types::*,
     },
-    isa::CallConv,
     machinst::{
         ArgPair, CallArgList, CallRetList, InstOutput, MachInst, VCodeConstant, VCodeConstantData,
     },
@@ -82,7 +81,7 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
     // we also create a (temporary) copy of the backchain.
     fn abi_emit_call_adjust_stack(&mut self, abi: Sig) -> Unit {
         let sig_data = &self.lower_ctx.sigs()[abi];
-        if sig_data.call_conv() == CallConv::Tail {
+        if sig_data.call_conv().is_tail() {
             let arg_space = sig_data.sized_stack_arg_space();
             if arg_space > 0 {
                 if self.backend.flags.preserve_frame_pointers() {
@@ -168,7 +167,7 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
     ) -> BoxCallInfo {
         let stack_ret_space = self.lower_ctx.sigs()[sig].sized_stack_ret_space();
         let stack_arg_space = self.lower_ctx.sigs()[sig].sized_stack_arg_space();
-        let total_space = if self.lower_ctx.sigs()[sig].call_conv() != CallConv::Tail {
+        let total_space = if !self.lower_ctx.sigs()[sig].call_conv().is_tail() {
             REG_SAVE_AREA_SIZE + stack_arg_space + stack_ret_space
         } else {
             REG_SAVE_AREA_SIZE + stack_ret_space

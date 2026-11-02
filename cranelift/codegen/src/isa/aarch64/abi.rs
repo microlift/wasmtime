@@ -175,7 +175,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
         // break our other invariants that the stack is always allocated in
         // 16-bytes chunks.
 
-        let mut next_xreg = if call_conv == isa::CallConv::Tail {
+        let mut next_xreg = if call_conv.is_tail() {
             // We reserve `x0` for the return area pointer. For simplicity, we
             // reserve it even when there is no return area pointer needed. This
             // also means that identity functions don't have to shuffle arguments to
@@ -202,14 +202,14 @@ impl ABIMachineSpec for AArch64MachineDeps {
 
         // `tail` passes integers in more than AAPCS64's eight, up to `x15`.
         let (max_xreg_vals, max_vreg_vals): (u8, u8) = match call_conv {
-            isa::CallConv::Tail => (16, max_per_class_reg_vals),
+            isa::CallConv::Tail | isa::CallConv::TailPreserveNone => (16, max_per_class_reg_vals),
             _ => (max_per_class_reg_vals, max_per_class_reg_vals),
         };
-        if call_conv == isa::CallConv::Tail {
+        if call_conv.is_tail() {
             remaining_reg_vals = 24;
         }
         // The next integer register to hand out, skipping the reserved `x8`.
-        let skip_reserved = |n: u8| if call_conv == isa::CallConv::Tail && n == 8 { 9 } else { n };
+        let skip_reserved = |n: u8| if call_conv.is_tail() && n == 8 { 9 } else { n };
 
         let ret_area_ptr = if add_ret_area_ptr {
             debug_assert_eq!(args_or_rets, ArgsOrRets::Args);
@@ -250,7 +250,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
 
             if let ir::ArgumentPurpose::StructReturn = param.purpose {
                 assert!(
-                    call_conv != isa::CallConv::Tail,
+                    !call_conv.is_tail(),
                     "support for StructReturn parameters is not implemented for the `tail` \
                     calling convention yet",
                 );
@@ -315,7 +315,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 next_xreg = skip_reserved(next_xreg);
                 // A split argument needs two consecutive registers, so a pair
                 // that would border the reserved `x8` starts after it instead.
-                if call_conv == isa::CallConv::Tail && next_xreg == 7 {
+                if call_conv.is_tail() && next_xreg == 7 {
                     next_xreg = 9;
                 }
                 let reg_class_space = max_xreg_vals - next_xreg;
@@ -738,7 +738,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
         }
 
         let callee_pop_size = match call_conv {
-            isa::CallConv::Tail => frame_layout.tail_args_size,
+            isa::CallConv::Tail | isa::CallConv::TailPreserveNone => frame_layout.tail_args_size,
             isa::CallConv::Winch => frame_layout.incoming_args_size,
             _ => 0,
         };
@@ -1223,6 +1223,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
     fn get_regs_clobbered_by_call(call_conv: isa::CallConv, is_exception: bool) -> PRegSet {
         match (call_conv, is_exception) {
             (isa::CallConv::Tail, true) => ALL_CLOBBERS,
+            (isa::CallConv::TailPreserveNone, _) => ALL_CLOBBERS,
             (isa::CallConv::Winch, true) => ALL_CLOBBERS,
             (isa::CallConv::Winch, false) => WINCH_CLOBBERS,
             // Note that "PreserveAll" actually preserves nothing at
@@ -1332,7 +1333,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
         // retval. `tail` passes values in `x9` but reserves `x8`
         // (see `compute_arg_locs`), so use that one there.
         match call_conv_of_callee {
-            isa::CallConv::Tail => regs::writable_xreg(8),
+            isa::CallConv::Tail | isa::CallConv::TailPreserveNone => regs::writable_xreg(8),
             _ => regs::writable_xreg(9),
         }
     }
@@ -1407,12 +1408,12 @@ impl AArch64MachineDeps {
             // the return address is decrypted.
             Some(if isa_flags.sign_return_address_with_bkey() {
                 match call_conv {
-                    isa::CallConv::Tail => APIKey::BZ,
+                    isa::CallConv::Tail | isa::CallConv::TailPreserveNone => APIKey::BZ,
                     _ => APIKey::BSP,
                 }
             } else {
                 match call_conv {
-                    isa::CallConv::Tail => APIKey::AZ,
+                    isa::CallConv::Tail | isa::CallConv::TailPreserveNone => APIKey::AZ,
                     _ => APIKey::ASP,
                 }
             })
@@ -1430,8 +1431,10 @@ fn is_reg_saved_in_prologue(
     sig: &Signature,
     r: RealReg,
 ) -> bool {
-    if call_conv == isa::CallConv::PreserveAll {
-        return true;
+    match call_conv {
+        isa::CallConv::PreserveAll => return true,
+        isa::CallConv::TailPreserveNone => return false,
+        _ => {}
     }
 
     // FIXME: We need to inspect whether a function is returning Z or P regs too.
